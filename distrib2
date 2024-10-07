@@ -1,0 +1,25 @@
+#~ /usr/bin/bash
+find . -type f -print0 | xargs -0 ls -l | awk '
+  {
+    n=int(log($5)/log(2));
+    if (n<10) { n=10; }
+    size[n]++                   # Count files
+    total_size[n] += $5          # Add file size to bucket total
+  }
+  END {
+    for (i in size) {
+      printf("%d %d ", 2^i, size[i])  # Print number of files
+      size_unit = "KiB"
+      total = total_size[i] / 1024
+      if (total >= 1024) {
+        total /= 1024
+        size_unit = "MiB"
+        if (total >= 1024) {
+          total /= 1024
+          size_unit = "GiB"
+        }
+      }
+      printf("%3.1f%s\n", total, size_unit)
+    }
+  }
+' | sort -n

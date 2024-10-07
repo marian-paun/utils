@@ -1,0 +1,36 @@
+#! /usr/bin/bash
+find . -type f -print0 | xargs -0 ls -l | awk '
+  {
+    n=int(log($5)/log(2));
+    if (n<10) { n=10; }  # Minimum bucket size 10 (1 KiB)
+    size[n]++                   # Count files
+    total_size[n] += $5          # Add file size to bucket total
+    human_size(n)                # Call function to convert file size for first column
+  }
+  END {
+    for (i in size) {
+      printf("%s %d ", human_sizes[i], size[i])  # Print human-readable size and number of files
+      size_unit = "KiB"
+      total = total_size[i] / 1024
+      if (total >= 1024) {
+        total /= 1024
+        size_unit = "MiB"
+        if (total >= 1024) {
+          total /= 1024
+          size_unit = "GiB"
+        }
+      }
+      printf("%3.1f%s\n", total, size_unit)
+    }
+  }
+
+  function human_size(size) {
+    x[1] = 2^size / 1024         # Convert to human-readable size (KiB)
+    if (x[1] >= 1024) {
+      x[2]++
+      human_size(x[2])
+    }
+    human_sizes[size] = sprintf("%3d%s", x[1], substr("kMGTEPYZ", x[2]+1, 1))
+  }
+' | sort -n
+
