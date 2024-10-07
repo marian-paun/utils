@@ -1,0 +1,17 @@
+# Set the age ranges in days
+ages=(0 1 7 15 30 60 90 180 365 730 1095 1460 1825)
+
+# Initialize the counts to zero
+counts=(0 0 0 0 0 0 0 0 0 0 0 0 0)
+
+# Iterate through the age ranges
+for i in $(seq 0 $((${#ages[@]} - 2))); do
+  # Find the files in the current age range and count them
+  count=$(find $1 -mtime "-${ages[$i+1]}" -mtime +"${ages[$i]}" -exec echo {} \; | wc -l)
+  counts[$i]=$count
+done
+
+# Print the results
+for i in $(seq 0 $((${#ages[@]} - 1))); do
+  echo "${counts[$i]} files are between ${ages[$i]} and ${ages[$i+1]} days old" | grep -v ^0
+done
