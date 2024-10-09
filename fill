@@ -1,0 +1,14 @@
+#!/bin/bash
+
+limit=2048
+
+n1=$(ls $2 | wc -l)
+sz=$(du -ms $2 | cut -f 1)
+echo "Existing: $n1 Size: $sz MB" | systemd-cat -p 6 -t Fill
+if [[ "$n1" -lt "$3" && "$sz" -lt "$limit" ]]; then
+   let n2=$3-$n1
+   echo "Need: $n2" | systemd-cat -p 5 -t Fill
+   cd $1
+   ls -t $1 | tail -$n2 |  xargs -d '\n' -I {} rsync -Prah --partial --progress --append --remove-sent-files --times {} $2 | grep -E 'mp3|m4a|mkv|mp4|avi|opus|flv|flac|ogg' | sed 's/->.*//' | systemd-cat -p 4 -t Fill
+   /usr/local/bin/telegram-notify --silent --success --title "Filled: $n2 items" 
+fi
