@@ -12,3 +12,5 @@ if [[ "$n1" -lt "$3" && "$sz" -lt "$limit" ]]; then
    ls -t $1 | tail -$n2 |  xargs -d '\n' -I {} rsync -Prah --partial --progress --append --remove-sent-files --times {} $2 | grep -E 'mp3|m4a|mkv|mp4|avi|opus|flv|flac|ogg' | sed 's/->.*//' | systemd-cat -p 4 -t Fill
    /usr/local/bin/telegram-notify --silent --success --title "Filled: $n2 items" 
 fi
+
+
