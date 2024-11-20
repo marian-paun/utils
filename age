@@ -1,3 +1,4 @@
+#!/usr/bin/bash
 # Set the age ranges in days
 ages=(0 1 7 15 30 60 90 180 365 730 1095 1460 1825)
 

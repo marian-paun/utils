@@ -1,0 +1,94 @@
+
+#!/bin/bash
+
+# MQTT broker details
+MQTT_BROKER="localhost"
+MQTT_PORT="1883"
+Rkbs=""
+Wkbs=""
+columns=""
+
+mqtt_send () {
+  /usr/bin/mosquitto_pub -h "$MQTT_BROKER" -p "$MQTT_PORT" -t "homeassistant/sensor/Rpi4/Procs/$1/Rkbs" -m $Rkbs
+  /usr/bin/mosquitto_pub -h "$MQTT_BROKER" -p "$MQTT_PORT" -t "homeassistant/sensor/Rpi4/Procs/$1/Wkbs" -m $Wkbs
+  Rkbs=""
+  Wkbs=""
+  columns=""
+  line=""
+}
+ 
+/usr/bin/pidstat -d -l 60 | tr -s ' ' | while IFS= read -r line; do
+  columns=($line)
+  Rkbs="${columns[4]}"
+  Wkbs="${columns[5]}"
+
+  case "$line" in
+    *"/app/bazarr/bin/bazarr/"*)
+      mqtt_send "bazarr"
+      ;;
+    *"Prowlarr"*)
+      mqtt_send "prowlarr"
+      ;;
+    *"Radarr"*)
+      mqtt_send "radarr"
+      ;;
+    *"/app/sonarr"*)
+      mqtt_send "sonarr"
+      ;;
+    *"telegraf"*)
+      mqtt_send "telegraf"
+      ;;
+    *"/usr/bin/transmission-daemon"*)
+      mqtt_send "transmission"
+      ;;
+    *"/usr/bin/mariadbd"*)
+      mqtt_send "mariadb"
+      ;;
+    *"/usr/bin/pihole-FTL no-daemon"*)
+      mqtt_send "pi-hole"
+      ;;
+    *"/usr/bin/syncthing"*)
+      mqtt_send "syncthing"
+      ;;
+    *"/watchtower"*)
+      mqtt_send "watchtower"
+      ;;
+    *"/portainer"*)
+      mqtt_send "portainer"
+      ;;
+    *"/usr/sbin/mosquitto"*)
+      mqtt_send "mosquitto"
+      ;;
+    *"/usr/local/bin/yt-dlp"*)
+      mqtt_send "yt-dlp"
+      ;;
+    *"raspiBackup"*)
+      mqtt_send "raspiBackup"
+      ;;
+    *"vnstatd"*)
+      mqtt_send "vnstatd"
+      ;;
+    *"containerd"*)
+      mqtt_send "containerd"
+      ;;
+    *"/bin/hass"*)
+      mqtt_send "hass"
+    ;;
+    *"/home/marp/fill.sh")
+      mqtt_send "fill"
+    ;;
+    *"dockerd")
+      mqtt_send "dockerd"
+    ;;
+    *"/usr/bin/jellyfin")
+      mqtt_send "jellyfin"
+    ;;
+    *"tailscaled")
+      mqtt_send "tailscale"
+    ;;
+  esac
+
+
+done
+
+

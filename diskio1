@@ -1,0 +1,10 @@
+#!/bin/bash
+
+DEV=$(df | grep "var/log" | sed 's/\/dev\///g' | cut -d " " -f1)
+
+while read -r device r_s rkB_s rrqm_s pct_rrqm r_await rareq_sz w_s wkB_s wrqm_s pct_wrqm w_await wareq_sz d_s dkB_s drqm_s pct_drqm d_await dareq_sz f_s f_await aqu_sz pct_util; do
+  DEV=$(df | grep "var/log" | sed 's/\/dev\///g' | cut -d " " -f1)
+#  [ "$device" == $DEV ] && echo "iostat,device=$device reads_sec=$r_s,writes_sec=$w_s,read_kbytes_sec=$rkB_s,write_kbytes_sec=$wkB_s,util_pct=$pct_util"
+  echo "iostat,device=$device reads_sec=$r_s,writes_sec=$w_s,read_kbytes_sec=$rkB_s,write_kbytes_sec=$wkB_s,util_pct=$pct_util" | grep zram
+done < <(iostat -dxyk $DEV 60 )
+exit 0

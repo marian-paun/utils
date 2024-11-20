@@ -1,0 +1,23 @@
+#!/bin/bash
+DEVLIST=$(devices=$(lsblk -rno NAME | grep zram | awk '{printf "%s ", $1}'); echo $devices)
+
+while true
+  do
+  I=10
+  echo "loop 1"
+  echo $I
+  while read -r device r_s rkB_s rrqm_s pct_rrqm r_await rareq_sz w_s wkB_s wrqm_s pct_wrqm w_await wareq_sz d_s dkB_s drqm_s pct_drqm d_await dareq_sz f_s f_await aqu_sz pct_util; do
+    echo $I $(date)
+    echo "iostat,device=$device reads_sec=$r_s,writes_sec=$w_s,read_kbytes_sec=$rkB_s,write_kbytes_sec=$wkB_s,util_pct=$pct_util" | grep zram
+    I= (($I - 1))
+    if [[ $I -eq 0 ]]
+      then
+        break;
+    fi
+  done < <(iostat -dxyk -g zram -H $DEVLIST 2 20  | grep zram )
+
+  DEVLIST=$(devices=$(lsblk -rno NAME | grep zram | awk '{printf "%s ", $1}'); echo $devices)
+  echo $DEVLIST
+done
+
+exit 0

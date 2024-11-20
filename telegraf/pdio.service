@@ -1,0 +1,16 @@
+[Unit]
+Description=pidstat monitoring service
+
+Wants=network.target	
+
+
+[Service]
+WorkingDirectory=/etc/telegraf/scripts/
+Type=simple
+ExecStart=/bin/bash /etc/telegraf/scripts/pdio
+Restart=on-failure
+RestartSec=10
+KillMode=process
+
+[Install]
+WantedBy=multi-user.target

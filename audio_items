@@ -1,0 +1,2 @@
+#!/bin/sh
+/etc/telegraf/scripts/items $1 '.*\.\(mp3\|m4a\|m4b\|opus\)$'

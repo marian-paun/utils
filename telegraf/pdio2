@@ -1,0 +1,66 @@
+#!/bin/bash
+
+# MQTT broker details
+MQTT_BROKER="localhost"
+MQTT_PORT="1883"
+Rkbs=""
+Wkbs=""
+columns=""
+
+mqtt_send () {
+   echo m1=Procs/$1/Rkbs/$Rkbs
+   echo m2=Procs/$1/Wkbs/$Wkbs
+  /usr/bin/mosquitto_pub -h "$MQTT_BROKER" -p "$MQTT_PORT" -t "homeassistant/sensor/Rpi4/Procs/$1/Rkbs" -m $Rkbs
+  /usr/bin/mosquitto_pub -h "$MQTT_BROKER" -p "$MQTT_PORT" -t "homeassistant/sensor/Rpi4/Procs/$1/Wkbs" -m $Wkbs
+  Rkbs=""
+  Wkbs=""
+  columns=""
+  line=""
+}
+ 
+/usr/bin/pidstat -d -l 10 | tr -s ' ' | while IFS= read -r line; do
+  columns=($line)
+  Rkbs="${columns[4]}"
+  Wkbs="${columns[5]}"
+echo '-------------------'
+echo $line
+echo C0="${columns[0]}"
+echo C1="${columns[1]}"
+echo C2="${columns[2]}"
+echo C3="${columns[3]}"
+echo C4="${columns[4]}"
+echo C5="${columns[5]}"
+echo C6="${columns[6]}"
+echo C7="${columns[7]}"
+echo C8="${columns[8]}"
+echo C9="${columns[9]}"
+echo C10="${columns[10]}"
+
+  if [[ "$line" == *"/app/bazarr/bin/bazarr/main.py"* ]] ; then
+    mqtt_send "bazarr"
+  elif [[ "$line" == *"Prowlarr"* ]] ; then
+    mqtt_send "prowlarr"
+  elif [[ "$line" == *"telegraf"* ]] ; then
+    mqtt_send "telegraf"
+  elif [[ "$line" == *"/usr/bin/transmission-daemon"* ]] ; then
+    mqtt_send "transmission"
+  elif [[ "$line" == *"/usr/bin/mariadbd"* ]] ; then
+    mqtt_send "mariadb"
+  elif [[ "$line" == *"mono --debug Sonarr.exe"* ]] ; then
+    mqtt_send "sonarr"
+  elif [[ "$line" == *"/usr/bin/pihole-FTL no-daemon"* ]] ; then
+    mqtt_send "pi-hole"
+  elif [[ "$line" == *"/usr/bin/syncthing"* ]] ; then
+    mqtt_send "syncthing"
+  elif [[ "$line" == *"/watchtower"* ]] ; then
+    mqtt_send "watchtower"
+  elif [[ "$line" == *"/portainer"* ]] ; then
+    mqtt_send "portainer"
+  elif [[ "$line" == *"/usr/sbin/mosquitto"* ]] ; then
+    mqtt_send "mosquitto"
+  elif [[ "$line" == *"python3 /usr/local/bin/yt-dlp"* ]] ; then
+    mqtt_send "yt-dlp"
+  fi
+done
+
+

@@ -1,0 +1,6 @@
+#!/bin/bash
+
+while read -r device r_s rkB_s rrqm_s pct_rrqm r_await rareq_sz w_s wkB_s wrqm_s pct_wrqm w_await wareq_sz d_s dkB_s drqm_s pct_drqm d_await dareq_sz f_s f_await aqu_sz pct_util; do
+  [ "$device" == sda ] && echo "iostat,device=$device reads_sec=$r_s,writes_sec=$w_s,read_kbytes_sec=$rkB_s,write_kbytes_sec=$wkB_s,util_pct=$pct_util"
+done < <(iostat -dxyk sda 60)
+exit 0

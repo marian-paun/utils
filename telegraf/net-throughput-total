@@ -1,0 +1,29 @@
+#!/bin/bash
+
+# Initialize variables
+old_rx=$(cat /sys/class/net/*/statistics/rx_bytes | awk '{sum += $1} END {print sum}')
+old_tx=$(cat /sys/class/net/*/statistics/tx_bytes | awk '{sum += $1} END {print sum}')
+
+Interval=10
+
+# Infinite loop
+while true; do
+  # Wait for 1 second
+  sleep $Interval
+
+  # Calculate network throughput
+  new_rx=$(cat /sys/class/net/*/statistics/rx_bytes | awk '{sum += $1} END {print sum}')
+  new_tx=$(cat /sys/class/net/*/statistics/tx_bytes | awk '{sum += $1} END {print sum}')
+  rx_throughput=$((new_rx - old_rx))
+  tx_throughput=$((new_tx - old_tx))
+  total_throughput=$((rx_throughput + tx_throughput))
+  total_throughput=$(echo $total_throughput $Interval | awk '{ printf ("%f", $1 / $2 / 1024) }')
+  echo $total_throughput
+
+
+
+  # Update old values
+  old_rx=$new_rx
+  old_tx=$new_tx
+done
+

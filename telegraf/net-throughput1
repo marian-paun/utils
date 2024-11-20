@@ -1,0 +1,33 @@
+#!/bin/bash
+
+INTERVAL="10"  # update interval in seconds
+
+if [ -z "$1" ]; then
+        echo usage: $0 [network-interface]
+        echo e.g. $0 eth0
+        exit
+fi
+
+IF=$1
+        R1=`cat /sys/class/net/$1/statistics/rx_bytes`
+        T1=`cat /sys/class/net/$1/statistics/tx_bytes`
+        sleep $INTERVAL
+
+while true
+do
+        R2=`cat /sys/class/net/$1/statistics/rx_bytes`
+        T2=`cat /sys/class/net/$1/statistics/tx_bytes`
+
+
+        TBPS=`expr $T2 - $T1`
+        RBPS=`expr $R2 - $R1`
+        TBPS=`expr $TBPS + $RBPS`
+	total_throughput=$(echo $TBPS $INTERVAL | awk '{ printf ("%f", $1 / $2 / 1024) }')
+
+        echo "${total_throughput}"
+
+
+        R1=$R2
+        T1=$T2
+        sleep $INTERVAL
+done
