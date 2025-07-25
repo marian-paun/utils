@@ -1,0 +1,17 @@
+[Unit]
+Description=Send sshguard blocking statistics
+After=network.target
+
+[Service]
+Type=oneshot
+#ExecStart=/usr/bin/bash -c 'mosquitto_pub -h 100.100.167.150 -t "homeassistant/sensor/oramicro1/sshguard" -m "$(journalctl --since '1 hour ago' -u sshguard | grep Blocking | wc -l)"'
+#ExecStart=/usr/bin/bash -c 'mosquitto_pub -h 100.109.6.66 -t "homeassistant/sensor/oramicro1/sshguard" -m `journalctl --since "1 hour ago" -u sshguard | grep Blocking | wc -l`'
+ExecStart=/usr/bin/bash -c 'mosquitto_pub -h rpi4.alpine-blues.ts.net -t "homeassistant/sensor/oramicro1/sshguard" -m `journalctl --since "1 hour ago" -u sshguard | grep Blocking | wc -l`'
+
+ExecStart=-/bin/bash -c '/usr/bin/rsync -azvh --times /lib/systemd/system/sshguard-stat.* /mnt/orabkt1/bkp/'
+
+#RemainAfterExit=true
+StandardOutput=journal
+
+[Install]
+WantedBy=multi-user.target

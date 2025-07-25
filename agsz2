@@ -28,10 +28,10 @@ for i in $(seq 0 $((${#ages[@]} - 2))); do
     files=$(find . -mtime "-${ages[$i+1]}" -mtime +"${ages[$i]}" -type f -printf '%P\n');
   fi
 #    files=$(find . -mtime "-${ages[$i+1]}" -mtime +"${ages[$i]}" -type f -printf '%P\n')
-    
+
     # Count the files
     counts[$i]=$(echo "$files" | wc -l)
-    
+
     # Calculate the total size and duration of the files
     total_size=0
     total_duration=0
@@ -54,16 +54,16 @@ grand_total_duration=0
 
 for i in $(seq 0 $((${#ages[@]} - 2))); do
     if [[ ${counts[$i]} -ne 0 && ${sizes[$i]} -ne 0 ]]; then
-        total_size_mb=$(printf "%'.3f" $(echo "scale=3; ${sizes[$i]} / (1024 * 1024)" | bc))
-        total_size_gb=$(printf "%'.3f" $(echo "scale=3; ${sizes[$i]} / (1024 * 1024 * 1024)" | bc))
-        
+        total_size_mb=$(printf "%.3f" $(echo "scale=3; ${sizes[$i]} / (1024 * 1024)" | bc))
+        total_size_gb=$(printf "%.3f" $(echo "scale=3; ${sizes[$i]} / (1024 * 1024 * 1024)" | bc))
+
         # Convert duration to hours with 2 decimal places
         duration_hours=$(printf "%.2f" $(echo "scale=2; ${durations[$i]} / 3600" | bc))
-        
+
         if [[ $(echo "${total_size_gb} < 1" | bc -q ) == 1 ]]; then
-            printf "%'5d files between %4d and %4d days old, size: %10.2f MB, duration: %8.2f hours\n" "${counts[$i]}" "${ages[$i]}" "${ages[$i+1]}" "${total_size_mb}" "${duration_hours}"
+            printf "%'5d files between %4d and %4d days old, size: %'10.2f MB, duration: %8.2f hours\n" "${counts[$i]}" "${ages[$i]}" "${ages[$i+1]}" "${total_size_mb}" "${duration_hours}"
         else
-            printf "%'5d files between %4d and %4d days old, size: %10.2f GB, duration: %8.2f hours\n" "${counts[$i]}" "${ages[$i]}" "${ages[$i+1]}" "${total_size_gb}" "${duration_hours}"
+            printf "%'5d files between %4d and %4d days old, size: %'10.2f GB, duration: %8.2f hours\n" "${counts[$i]}" "${ages[$i]}" "${ages[$i+1]}" "${total_size_gb}" "${duration_hours}"
         fi
 
         # Update grand totals

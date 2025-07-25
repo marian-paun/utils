@@ -1,0 +1,302 @@
+#!/bin/bash
+NICE_VALUE=15
+# hevc_video_converter.sh
+# This script converts non-HEVC video files to HEVC (H.265) on a Raspberry Pi 4.
+# It checks if a video is already HEVC, H.265, or VP9 encoded and, if not, re-encodes it.
+# Upon successful conversion, it checks if the new file is smaller than the original.
+# If smaller, the original file is replaced; otherwise, the new file is rejected.
+# This version intelligently uses RAM-backed /tmp for temporary files if sufficient space is available
+# for the *current file being processed*, falling back to a disk-based directory otherwise.
+
+# --- Configuration ---
+# Directory containing video files. Can be local or an NFS mount.
+# IMPORTANT: Replace "/path/to/your/videos" with your actual video folder.
+VIDEO_DIR=$1
+
+# --- Temporary Directory Settings ---
+# Primary temporary directory (ideally RAM-backed, like /tmp on Raspberry Pi)
+PRIMARY_TEMP_DIR="/tmp"
+
+# Fallback temporary directory (disk-based, used if PRIMARY_TEMP_DIR has insufficient space)
+# Ensure this directory is on a partition with sufficient disk space.
+FALLBACK_TEMP_DIR="/data/torrent/downloading"
+
+# --- FFmpeg Encoding Settings ---
+# CRF (Constant Rate Factor): Controls the quality and file size.
+# Lower CRF means higher quality and larger file size.
+# Higher CRF means lower quality and smaller file size.
+# A good starting range for 8-bit HEVC is 24-28.
+# 24-26 is generally good for quality, 27-28 for more compression.
+# Adjust this based on your preference and the source video quality.
+CRF_VALUE=26
+
+# Preset: Controls encoding speed vs. compression efficiency.
+# Slower presets give better compression but take much longer.
+# Faster presets are quicker but result in larger files for the same quality.
+# For Raspberry Pi 4, 'medium' or 'slow' are good starting points.
+# 'medium' is a good balance. 'slow' will give better results but take significantly longer.
+# 'veryfast' or 'fast' might be too quick for good compression.
+PRESET_VALUE="medium"
+
+# Video extensions to process. Add or remove as needed.
+VIDEO_EXTENSIONS=("mp4" "mkv" "avi" "mov" "flv" "webm" "wmv")
+
+# --- Global Variables for Statistics ---
+TOTAL_ORIGINAL_SIZE=0 # In bytes
+TOTAL_FINAL_SIZE=0    # In bytes
+
+# --- Functions ---
+
+# Function to log messages with timestamps
+log_message() {
+    echo "$(date '+%Y-%m-%d %H:%M:%S') - $1"
+}
+
+# Function to convert bytes to human-readable format
+bytes_to_human_readable() {
+    local bytes=$1
+    local KB=$((bytes / 1024))
+    local MB=$((bytes / 1024 / 1024))
+    local GB=$((bytes / 1024 / 1024 / 1024))
+
+    if (( GB > 0 )); then
+        printf "%.2f GB" $(echo "scale=2; $bytes / (1024*1024*1024)" | bc)
+    elif (( MB > 0 )); then
+        printf "%.2f MB" $(echo "scale=2; $bytes / (1024*1024)" | bc)
+    elif (( KB > 0 )); then
+        printf "%.2f KB" $(echo "scale=2; $bytes / 1024" | bc)
+    else
+        printf "%d bytes" "$bytes"
+    fi
+}
+
+# Function to get free space in bytes for a given directory
+get_free_space_bytes() {
+    local dir=$1
+    # df -P outputs in 1KB blocks. We take the 4th column (Available), then multiply by 1024 to get bytes.
+    # -P ensures POSIX output format, which is more stable for parsing.
+    df -P "$dir" | awk 'NR==2 {print $4 * 1024}' 2>/dev/null || echo 0
+}
+
+# Ensure required tools are installed
+check_dependencies() {
+    log_message "Checking for ffmpeg and ffprobe..."
+    if ! command -v ffmpeg &> /dev/null; then
+        log_message "Error: ffmpeg not found. Please install it (e.g., sudo apt install ffmpeg)."
+        exit 1
+    fi
+    if ! command -v ffprobe &> /dev/null; then
+        log_message "Error: ffprobe not found. Please install it (e.g., sudo apt install ffmpeg)."
+        exit 1
+    fi
+    if ! command -v uuidgen &> /dev/null; then
+        log_message "Error: uuidgen not found. Please install it (e.g., sudo apt install uuid-runtime)."
+        exit 1
+    fi
+    if ! command -v bc &> /dev/null; then
+        log_message "Error: 'bc' (arbitrary precision calculator) not found. Please install it (e.g., sudo apt install bc)."
+        exit 1
+    fi
+    if ! command -v df &> /dev/null; then
+        log_message "Error: 'df' command not found. Please install coreutils if missing."
+        exit 1
+    fi
+    log_message "ffmpeg, ffprobe, uuidgen, bc, and df found."
+}
+
+# --- Main Script Logic ---
+
+check_dependencies
+
+# Create both potential temporary directories at the start to ensure they exist
+#mkdir -p "$PRIMARY_TEMP_DIR" || { log_message "Error: Could not create primary temporary directory $PRIMARY_TEMP_DIR. Check permissions."; exit 1; }
+#mkdir -p "$FALLBACK_TEMP_DIR" || { log_message "Error: Could not create fallback temporary directory $FALLBACK_TEMP_DIR. Check permissions."; exit 1; }
+log_message "Primary temporary directory: $PRIMARY_TEMP_DIR"
+log_message "Fallback temporary directory: $FALLBACK_TEMP_DIR"
+
+
+log_message "Starting HEVC conversion process in: $VIDEO_DIR"
+log_message "CRF: $CRF_VALUE, Preset: $PRESET_VALUE"
+
+# Loop through each video extension
+for ext in "${VIDEO_EXTENSIONS[@]}"; do
+    # Find all files with the current extension, excluding directories
+    # The -print0 and xargs -0 are used for safe handling of filenames with spaces or special characters.
+    find "$VIDEO_DIR" -type f -name "*.${ext}" -print0 | while IFS= read -r -d $'\0' video_file; do
+        if [[ -z "$video_file" ]]; then
+            continue # Skip if video_file is empty (e.g., no files found)
+        fi
+
+        log_message "Processing file: $video_file"
+
+        # Check if the video file exists and is readable
+        if [[ ! -f "$video_file" ]]; then
+            log_message "Warning: File not found or not readable: $video_file. Skipping."
+            continue
+        fi
+
+        # Get original file size BEFORE processing
+        current_original_size=$(stat -c %s "$video_file" 2>/dev/null || echo 0)
+        if [[ "$current_original_size" -eq 0 ]]; then
+             log_message "Warning: Could not get original size for $video_file. Skipping this file's size from totals."
+             continue
+        fi
+
+        # Get video codec using ffprobe
+        # We look for the first video stream (stream:v:0) and its codec_name
+        codec_name=$(ffprobe -v error -select_streams v:0 -show_entries stream=codec_name -of default=noprint_wrappers=1:nokey=1 "$video_file" 2>/dev/null)
+
+        if [[ -z "$codec_name" ]]; then
+            log_message "Warning: Could not determine codec for $video_file. Skipping."
+            continue
+        fi
+
+        log_message "Detected codec: $codec_name for $video_file"
+
+        # Convert to lowercase for case-insensitive comparison
+        codec_name_lower=$(echo "$codec_name" | tr '[:upper:]' '[:lower:]')
+
+        # Check if file is already HEVC, H.265, or VP9 encoded
+        if [[ "$codec_name_lower" == "hevc" || "$codec_name_lower" == "h265" || "$codec_name_lower" == "vp9" ]]; then
+            log_message "File already HEVC, H.265, or VP9 encoded. Skipping: $video_file"
+            # Add original size to total even if not converted, as it's part of the starting set
+            TOTAL_ORIGINAL_SIZE=$((TOTAL_ORIGINAL_SIZE + current_original_size))
+            TOTAL_FINAL_SIZE=$((TOTAL_FINAL_SIZE + current_original_size)) # No change in size
+            continue
+        fi
+
+        log_message "File is not HEVC/H.265/VP9. Preparing to encode: $video_file"
+
+        # --- Dynamic Temporary Directory Selection for THIS file ---
+        temp_dir_for_current_file=""
+        FREE_SPACE_PRIMARY_TMP_BYTES=$(get_free_space_bytes "$PRIMARY_TEMP_DIR")
+
+        if (( FREE_SPACE_PRIMARY_TMP_BYTES >= current_original_size )); then
+            temp_dir_for_current_file="$PRIMARY_TEMP_DIR"
+            log_message "Using RAM-backed temporary directory for '$video_file' (Available: $(bytes_to_human_readable "$FREE_SPACE_PRIMARY_TMP_BYTES")))"
+        else
+            temp_dir_for_current_file="$FALLBACK_TEMP_DIR"
+            log_message "Not enough free space in $PRIMARY_TEMP_DIR for '$video_file' ($(bytes_to_human_readable "$FREE_SPACE_PRIMARY_TMP_BYTES") available, needs at least $(bytes_to_human_readable "$current_original_size"))). Using disk-based temporary directory: $FALLBACK_TEMP_DIR"
+        fi
+
+        # Define temporary output filename using the chosen temporary directory for this file
+        # Using a UUID to ensure uniqueness, preventing conflicts
+        temp_output_filename=$(basename "$video_file" | sed 's/\(.*\)\..*/\1/')_$(uuidgen).mkv
+        temp_output_path="${temp_dir_for_current_file}/${temp_output_filename}"
+
+        log_message "Encoding $video_file to $temp_output_path"
+
+        # --- FFmpeg Encoding Command ---
+        # -i "$video_file": Input file
+        # -c:v libx265: Use libx265 encoder for HEVC
+        # -crf "$CRF_VALUE": Constant Rate Factor for quality
+        # -preset "$PRESET_VALUE": Encoding speed/efficiency preset
+        # -c:a copy: Copy audio stream without re-encoding (saves time and avoids quality loss)
+        # -c:s copy: Copy subtitle streams without re-encoding
+        # -map 0: Copy all streams from input to output (video, audio, subtitles, data)
+        # -tag:v hvc1: Ensures compatibility with some players/devices (macOS, iOS) for HEVC
+        # -pix_fmt yuv420p: Ensure 8-bit 4:2:0 pixel format, common for HEVC 8-bit.
+        # -nostdin: Prevents ffmpeg from trying to read from standard input,
+        #           which can cause it to enter interactive mode.
+        # < /dev/null: Explicitly redirects stdin to /dev/null to ensure non-interactive operation.
+        # -y: Overwrite output file without asking
+        # Added -threads 0 to use all available CPU cores for encoding on the Pi.
+        # Added -stats to show encoding progress in the console.
+
+#        nice -n "$NICE_VALUE" ffmpeg -i "$video_file" \
+#               -c:v libx265 \
+#               -crf "$CRF_VALUE" \
+#               -preset "$PRESET_VALUE" \
+#               -c:a copy \
+#               -c:s copy \
+#               -map 0 \
+#               -sn \
+#               -tag:v hvc1 \
+#               -pix_fmt yuv420p \
+#               -threads 0 \
+#               -stats \
+#               -hide_banner \
+#               -loglevel error \
+#               -x265-params "log-level=error" \
+#               -nostdin \
+#               -y "$temp_output_path" < /dev/null
+
+
+        nice -n "$NICE_VALUE" ffmpeg -i "$video_file" \
+               -c:v libx265 \
+               -crf "$CRF_VALUE" \
+               -preset "$PRESET_VALUE" \
+               -x265-params "log-level=error" \
+               -c:a copy \
+               -map 0:v:0 \
+               -map 0:a:0 \
+               -sn \
+               -tag:v hvc1 \
+               -pix_fmt yuv420p \
+               -threads 0 \
+               -stats \
+               -hide_banner \
+               -loglevel error \
+               -nostdin \
+               -y "$temp_output_path" < /dev/null
+
+        # Check if ffmpeg encoding was successful
+        if [[ $? -eq 0 ]]; then
+            log_message "Successfully encoded: $video_file"
+
+            # Get new file size
+            new_size=$(stat -c %s "$temp_output_path" 2>/dev/null || echo 0)
+            if [[ "$new_size" -eq 0 ]]; then
+                 log_message "Error: Could not get size of newly encoded file $temp_output_path. Skipping size calculation for this file and not replacing."
+                 rm -f "$temp_output_path" # Delete the temp file as its size couldn't be determined
+                 TOTAL_ORIGINAL_SIZE=$((TOTAL_ORIGINAL_SIZE + current_original_size))
+                 TOTAL_FINAL_SIZE=$((TOTAL_FINAL_SIZE + current_original_size)) # Original file remains
+                 continue
+            fi
+
+            log_message "Original size: $(bytes_to_human_readable "$current_original_size"), New size: $(bytes_to_human_readable "$new_size")"
+
+            # Check if new file is smaller than original
+            if (( new_size < current_original_size )); then
+                log_message "New file is smaller. Replacing original file with new HEVC file..."
+                if mv "$temp_output_path" "$video_file"; then
+                    log_message "Replacement successful for: $video_file"
+                    TOTAL_ORIGINAL_SIZE=$((TOTAL_ORIGINAL_SIZE + current_original_size))
+                    TOTAL_FINAL_SIZE=$((TOTAL_FINAL_SIZE + new_size))
+                else
+                    log_message "Error: Failed to replace original file $video_file with $temp_output_path. Original file remains. New file is at $temp_output_path"
+                    TOTAL_ORIGINAL_SIZE=$((TOTAL_ORIGINAL_SIZE + current_original_size))
+                    TOTAL_FINAL_SIZE=$((TOTAL_FINAL_SIZE + current_original_size)) # Original file remains
+                fi
+            else
+                log_message "New file size ($(bytes_to_human_readable "$new_size")) is not smaller than original ($(bytes_to_human_readable "$current_original_size")). Rejecting transcoded file."
+                rm -f "$temp_output_path" # Delete the larger/equal size transcoded file
+                TOTAL_ORIGINAL_SIZE=$((TOTAL_ORIGINAL_SIZE + current_original_size))
+                TOTAL_FINAL_SIZE=$((TOTAL_FINAL_SIZE + current_original_size)) # Original file remains, so its size contributes to final total
+            fi
+        else
+            log_message "Error: FFmpeg encoding failed for $video_file. Temporary file: $temp_output_path (kept for inspection)."
+            # If encoding failed, we don't add to final size, but original size still counts for the total starting amount.
+            TOTAL_ORIGINAL_SIZE=$((TOTAL_ORIGINAL_SIZE + current_original_size))
+            TOTAL_FINAL_SIZE=$((TOTAL_FINAL_SIZE + current_original_size)) # Original file remains unchanged
+            # You might want to delete the temp file here if encoding failed:
+            # rm -f "$temp_output_path"
+        fi
+        echo # Add a newline for better readability between files
+    done
+done
+
+log_message "HEVC conversion process completed."
+
+# --- Display Total Statistics ---
+log_message "--- Overall Conversion Statistics ---"
+log_message "Total Starting Size: $(bytes_to_human_readable "$TOTAL_ORIGINAL_SIZE")"
+log_message "Total Final Size (after conversions): $(bytes_to_human_readable "$TOTAL_FINAL_SIZE")"
+
+SPACE_SAVED=$((TOTAL_ORIGINAL_SIZE - TOTAL_FINAL_SIZE))
+if (( SPACE_SAVED < 0 )); then
+    log_message "Note: The final total size is larger than the starting total size. This indicates cases where non-HEVC files were already very small or highly compressed, and re-encoding to HEVC (even at a low CRF) resulted in a larger file which was then rejected. This can also happen if the primary temporary directory did not have enough space, forcing the use of a larger fallback directory, but not impacting the file size calculation."
+fi
+log_message "Total Space Saved: $(bytes_to_human_readable "$SPACE_SAVED")"
+
+log_message "You can safely remove the temporary directories if they are empty: $PRIMARY_TEMP_DIR and $FALLBACK_TEMP_DIR"

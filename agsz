@@ -29,13 +29,13 @@ for i in $(seq 0 $((${#ages[@]} - 1))); do
   total_size_mb=0
   total_size_gb=0
   if [[ ${counts[$i]} -gt 0 && ${sizes[$i]} -gt 0 ]]; then
-    total_size_mb=$(printf "%'.3f" $(echo "scale=3; ${sizes[$i]} / (1024 * 1024)" | bc))
-    total_size_gb=$(printf "%'.3f" $(echo "scale=3; ${sizes[$i]} / (1024 * 1024 * 1024)" | bc))
+    total_size_mb=$(printf "%.3f" $(echo "scale=3; ${sizes[$i]} / 1024 / 1024" | bc))
+    total_size_gb=$(printf "%.3f" $(echo "scale=3; ${sizes[$i]} / 1024 / 1024 / 1024" | bc))
 
     if [[ $(echo "${total_size_gb} < 1" | bc -q ) == 1 ]]; then
-       printf "%'6d files between %4d and %4d days old, size: %11.2f MB\n" "${counts[$i]}" "${ages[$i]}" "${ages[$i+1]}" "${total_size_mb}"
+       printf "%'9d files between %4d and %4d days old, size: %'9.3f MB\n" "${counts[$i]}" "${ages[$i]}" "${ages[$i+1]}" "${total_size_mb}"
     else
-       printf "%'6d files between %4d and %4d days old, size: %11.2f GB\n" "${counts[$i]}" "${ages[$i]}" "${ages[$i+1]}" "${total_size_gb}"
+       printf "%'9d files between %4d and %4d days old, size: %'9.3f GB\n" "${counts[$i]}" "${ages[$i]}" "${ages[$i+1]}" "${total_size_gb}"
     fi
   fi
 done

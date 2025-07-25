@@ -1,0 +1,13 @@
+[Unit]
+Description=Metrics2mqtt Restart Listener Service
+After=network.target
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+ExecStart=/bin/bash -c '/home/ubuntu/bin/mqtt-wait.sh'
+Restart=always
+RestartSec=60
+
+[Install]
+WantedBy=multi-user.target
