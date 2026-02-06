@@ -1,0 +1,66 @@
+#!/usr/bin/bash
+
+get_size() {
+  /usr/bin/rclone --config /home/marp/.config/rclone/rclone.conf size "$1" --json
+}
+
+# Function to process a single cloud storage
+process_storage() {
+  local storage_name="${1%:}"  # Remove the trailing colon
+  local size_info=$(/usr/bin/rclone --config /home/marp/.config/rclone/rclone.conf size "$1" --exclude "Personal Vault/**" --json)
+
+  if [[ $? -eq 0 ]]; then
+    # Parse the JSON output to extract count and bytes
+    local count=$(echo "$size_info" | /usr/bin/jq -r '.count')
+    local bytes=$(echo "$size_info" | /usr/bin/jq -r '.bytes')
+    # Accumulate totals
+    total_count=$((total_count + count))
+    total_bytes=$((total_bytes + bytes))
+  fi
+}
+
+# Initialize variables to store total count and bytes
+total_count=0
+total_bytes=0
+
+process_storage "blz_marian_paun_gmail:";
+process_storage "blz_marian_paun_outlook:";
+process_storage "box_marian_paun_gmail_com:";
+process_storage "box_marian_paun_outlook_com:";
+process_storage "box_marp188_gmail_com:";
+process_storage "gdrive_marian_paun_outlook:";
+process_storage "gdrive_marp188_gmail:";
+process_storage "mega_4m64mhpw4:";
+process_storage "mega_9ac8yk6ci:";
+process_storage "mega_cv29dm66q:";
+process_storage "mega_labrador:";
+process_storage "mega_maktoum_pile:";
+process_storage "mega_marian-paun_outlook_com:";
+process_storage "mega_marian_paun_7ilk00u6_gmail_com:";
+process_storage "mega_marian_paun_gmail_com:";
+process_storage "mega_marian_paun_hotmail_com:";
+process_storage "mega_marian_paun_live_com:";
+process_storage "mega_marian_paun_outlook_com:";
+process_storage "mega_marianpaun_gmail_com:";
+process_storage "mega_marp188_gmail_com:";
+process_storage "mega_marp188_outlook_com:";
+process_storage "mega_mbl5yfs9t:";
+process_storage "mega_pupil_ashy511:";
+process_storage "mega_r88wqihsk:";
+process_storage "mega_spiny_landscape:";
+process_storage "mega_undusted:";
+process_storage "onedrive_labrador_smog:";
+process_storage "onedrive_marian_paun_gmail:";
+process_storage "onedrive_marian_paun_live:";
+process_storage "onedrive_marian_paun_outlook:";
+process_storage "onedrive_undusted:";
+process_storage "pcloud_marian_paun_gmail_com:";
+process_storage "pcloud_marian_paun_live_com:";
+
+
+# Create the final JSON output
+final_json="{\"total_count\":$total_count,\"total_bytes\":$total_bytes}";
+
+# Send the final JSON output to Mosquitto
+#/usr/bin/mosquitto_pub --unix /tmp/mosquitto.sock -t "homeassistant/sensor/cloud" -m "$final_json";
+/usr/bin/mosquitto_pub -h 10..0.0.119 -t "homeassistant/sensor/cloud" -m "$final_json";

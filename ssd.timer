@@ -1,0 +1,11 @@
+[Unit]
+Description=Periodic collects media size
+
+[Timer]
+#OnCalendar=*-*-* *:00:00
+OnBootSec=15min
+OnUnitInactiveSec=1min
+Persistent=true
+
+[Install]
+WantedBy=timers.target

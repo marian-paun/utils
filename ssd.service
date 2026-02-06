@@ -1,0 +1,26 @@
+
+[Unit]
+Description=unit for geting ssd statistics
+#After=mnt-Astor.Audio.mount network-online.target
+#After=mnt-Astor.Audio.mount
+#Requires=mnt-Astor.Audio.mount network-online.target
+#Requires=mnt-Astor.Audio.mount
+
+
+[Service]
+Type=oneshot
+#User=marp
+#Group=marp
+StandardOutput=journal
+Environment=REMOTE_HOST="192.168.1.100"
+Environment=REMOTE_USER="marp"
+Environment=KEY_FILE="/home/marp/.ssh/astor_rsa.key"
+Environment=LOCAL_SCRIPT="/data/configs/scripts/media.sh"
+
+#ExecStart=-/usr/bin/nohup /usr/bin/ssh -i $KEY_FILE marp@192.168.1.100 "/volume1/home/marp/telegraf/scripts/media.sh"
+#ExecStart=-/usr/bin/ssh -i $KEY_FILE marp@192.168.1.100 '/bin/sh -s' < /home/marp/.config/homeassistant/mqtt-scripts/media.sh
+#ExecStart=/bin/bash -c 'cat "${LOCAL_SCRIPT}" | ssh -i "${KEY_FILE}" "${REMOTE_USER}"@"${REMOTE_HOST}" "sh -s"'
+ExecStart=-/data/configs/scripts/ssd.sh
+
+Nice=10
+

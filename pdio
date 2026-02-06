@@ -1,0 +1,33 @@
+#!/bin/bash
+
+# MQTT broker details
+MQTT_BROKER="192.168.1.111"
+MQTT_PORT="1883"
+Rkbs=""
+Wkbs=""
+columns=""
+Command=""
+
+entry()
+  {
+  output=$(echo "{ \"$1\": {\"Rkbs\": $Rkbs, \"Wkbs\": $Wkbs} }")
+  /usr/bin/mosquitto_pub -h $MQTT_BROKER -t "homeassistant/sensor/Rpi4/pidstat" -m "$output"
+  }
+
+while IFS= read -r line; do
+  columns=($line)
+  Rkbs="${columns[4]}"
+  Wkbs="${columns[5]}"
+  Command="${columns[8]}"
+  case $Command in
+#    *telegraf*)
+#      entry telegraf
+#      ;;
+    *yt-dlp*)
+      entry yt-dlp
+      ;;
+    *fill.sh*)
+      entry fill
+  esac
+done < <(/usr/bin/pidstat -d -l 15)
+

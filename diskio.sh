@@ -61,9 +61,9 @@ while read -a cols; do
     if [ "$zram_count" -eq "$TOTAL_ZRAMS" ]; then
       avg_util=$(echo "scale=2; $zram_util / $zram_count" | bc)
       zram_json=$(create_device_json "zram" "$zram_r_s" "$zram_rkB_s" "$zram_w_s" "$zram_wkB_s" "$avg_util")
+
       json_message="{$sda_json, $zram_json}"
       /usr/bin/mosquitto_pub -h "$BROKER" -t "$TOPIC" -m "$json_message"
-#      echo "$json_message"
 
       # Reset
       zram_r_s=0; zram_rkB_s=0; zram_w_s=0; zram_wkB_s=0; zram_util=0; zram_count=0

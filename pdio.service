@@ -1,0 +1,15 @@
+[Unit]
+Description=pidstat monitoring service
+Wants=network.target	
+
+
+[Service]
+WorkingDirectory=/home/marp/.config/homeassistant/mqtt-scripts/
+Type=simple
+ExecStart=/bin/bash /home/marp/.config/homeassistant/mqtt-scripts/pdio
+Restart=on-failure
+RestartSec=10
+KillMode=process
+
+[Install]
+WantedBy=multi-user.target
