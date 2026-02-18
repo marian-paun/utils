@@ -1,0 +1,109 @@
+#!/bin/bash
+
+# Configuration
+BITRATE="320k"
+AUDIO_CODEC="aac"
+OUTPUT_EXT="m4a"
+
+# 1. Get input folder from first command-line argument, default to "."
+SEARCH_DIR="${1:-.}";
+
+# 2. Validate that the input folder exists
+if [[ ! -d "$SEARCH_DIR" ]]; then
+    echo "Error: Directory '$SEARCH_DIR' does not exist."
+    echo "Usage: $0 [input_folder_path]"
+    exit 1
+fi
+
+# Check for required tools
+for tool in ffmpeg ffprobe; do
+    if ! command -v "$tool" >/dev/null 2>&1; then
+        echo "Error: $tool is not installed."
+        exit 1
+    fi
+done
+
+echo "Searching for FLAC and MP3 files in: $SEARCH_DIR"
+
+# 3. Find FLAC and MP3 files
+# Using -print0 and mapfile -d '' is the most robust way to handle filenames with spaces/newlines
+mapfile -d '' ALL_FILES < <(find "$SEARCH_DIR" -type f \( -iname "*.flac" -o -iname "*.mp3" \) -print0)
+
+TOTAL_FILES=${#ALL_FILES[@]}
+CURRENT_FILE=0
+
+if [[ $TOTAL_FILES -eq 0 ]]; then
+    echo "No .flac or .mp3 files found in '$SEARCH_DIR'."
+    exit 0
+fi
+
+echo "Found $TOTAL_FILES files to process."
+
+for input in "${ALL_FILES[@]}"; do
+    ((CURRENT_FILE++))
+
+    dir=$(dirname "$input")
+    filename=$(basename "$input")
+    filename_no_ext="${filename%.*}"
+    output="$dir/$filename_no_ext.$OUTPUT_EXT"
+
+    PERCENT=$(( CURRENT_FILE * 100 / TOTAL_FILES ))
+
+    echo "------------------------------------------------------------"
+    echo "[$PERCENT%] Processing $CURRENT_FILE of $TOTAL_FILES: $filename"
+    echo "------------------------------------------------------------"
+
+    if [[ -f "$output" ]]; then
+        echo "Skipping (output exists: $(basename "$output"))"
+        continue
+    fi
+
+    # Check for embedded art (attached picture)
+    # We look for any video stream which is typically the cover art in audio files
+    has_embedded=$(ffprobe -v quiet -select_streams v -show_entries stream=index -of csv=p=0 "$input" | head -n 1)
+
+    # Base ffmpeg command
+    # -hide_banner reduces clutter, -map_metadata 0 copies tags
+    cmd=(ffmpeg -hide_banner -loglevel error -stats -y -i "$input")
+
+    if [[ -n "$has_embedded" ]]; then
+        # Use embedded art: map first audio and first video stream
+        # -c:v copy preserves the image format (usually MJPEG or PNG)
+        cmd+=(-map 0:a -map 0:v:0 -c:v copy -disposition:v:0 attached_pic)
+    else
+        # Look for external cover art in the same directory with prioritized names
+        cover=""
+        for pattern in "cover.jpg" "cover.jpeg" "cover.png" "folder.jpg" "folder.png" "front.jpg" "front.png" "*.jpg" "*.png"; do
+             # Find the first file matching the pattern in the same directory
+             found=$(find "$dir" -maxdepth 1 -type f -iname "$pattern" -print -quit)
+             if [[ -n "$found" ]]; then
+                 cover="$found"
+                 break
+             fi
+        done
+        
+        if [[ -n "$cover" ]]; then
+            echo "Using external cover: $(basename "$cover")"
+            # Map audio from input 0 and video from input 1 (the cover)
+            cmd+=(-i "$cover" -map 0:a -map 1:v -c:v mjpeg -disposition:v:0 attached_pic)
+        else
+            # No art found, just map audio
+            cmd+=(-map 0:a)
+        fi
+    fi
+
+    # Add output options and final output file path
+    cmd+=(-c:a "$AUDIO_CODEC" -b:a "$BITRATE" -map_metadata 0 -movflags +faststart "$output")
+
+    # Execute the conversion
+    if "${cmd[@]}"; then
+        echo "Successfully finished: $(basename "$output")"
+    else
+        echo "Error converting: $filename"
+        # Remove partial output file if it exists to avoid corrupt files
+        [[ -f "$output" ]] && rm "$output"
+    fi
+done
+
+echo "------------------------------------------------------------"
+echo "Batch conversion complete."
