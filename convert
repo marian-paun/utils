@@ -3,7 +3,7 @@
 # ==============================================================================
 # CONFIGURATION
 # ==============================================================================
-BITRATE="320k"
+AUDIO_QUALITY="-q:a 2"
 AUDIO_CODEC="aac"
 OUTPUT_EXT="m4a"
 
@@ -115,7 +115,7 @@ convert_single_file() {
     cmd+=("${art_args[@]}")
 
     # Add output options and final output file path
-    cmd+=(-c:a "$AUDIO_CODEC" -b:a "$BITRATE" -map_metadata 0 -movflags +faststart "$output")
+    cmd+=(-c:a "$AUDIO_CODEC" $AUDIO_QUALITY -map_metadata 0 -movflags +faststart "$output")
 
     # Execute the conversion
     if "${cmd[@]}"; then
@@ -257,7 +257,7 @@ if [[ $NUM_CUE -eq 1 && $NUM_AUDIO -eq 1 ]]; then
                 cmd+=("${art_args[@]}")
 
                 # Add output options, copy all metadata from the source flac, and set output path
-                cmd+=(-c:a "$AUDIO_CODEC" -b:a "$BITRATE" -map_metadata 0 -movflags +faststart "$output_file")
+                cmd+=(-c:a "$AUDIO_CODEC" $AUDIO_QUALITY -map_metadata 0 -movflags +faststart "$output_file")
 
                 # Execute conversion
                 if ! "${cmd[@]}"; then
@@ -373,7 +373,7 @@ if [[ $NUM_CUE -eq 1 && $NUM_AUDIO -eq 1 ]]; then
 
 
                 # Add encoding options and output file
-                cmd+=(-c:a "$AUDIO_CODEC" -b:a "$BITRATE" -movflags +faststart "$output")
+                cmd+=(-c:a "$AUDIO_CODEC" $AUDIO_QUALITY -movflags +faststart "$output")
 
                 echo "Executing ffmpeg with generated chapter metadata..." >&2
                 if "${cmd[@]}"; then
