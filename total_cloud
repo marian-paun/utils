@@ -1,9 +1,5 @@
 #!/usr/bin/bash
 
-MQTT_BROWSER="oramicro2.alpine-blues.ts.net"
-MQTT_USER=marp
-MQTT_PWD=kolosal
-
 get_size() {
   /usr/bin/rclone --config /home/marp/.config/rclone/rclone.conf size "$1" --json
 }
