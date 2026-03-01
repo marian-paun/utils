@@ -16,4 +16,4 @@ MESSAGE="🚨 *Service Failure Alert* 🚨
 *Last Logs:*
 $LOGS"
 
-/usr/local/bin/pushover -p 2 -s echo -Title "Service Failure on $HOSTNAME" "$MESSAGE"
+/usr/local/bin/pushover -p 1 -s bike -Title "Service Failure on $HOSTNAME" "$MESSAGE"

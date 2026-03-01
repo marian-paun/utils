@@ -1,7 +1,8 @@
 #!/usr/bin/bash
 
 # Configuration
-BROKER="oramicro1.alpine-blues.ts.net"
+BROKER="oramicro2.alpine-blues.ts.net"
+
 TOPIC="homeassistant/sensor/Rpi4/diskio"
 ZRAM_DEVICES=(/dev/zram*)
 TOTAL_ZRAMS=${#ZRAM_DEVICES[@]}
@@ -62,7 +63,7 @@ while read -a cols; do
       avg_util=$(echo "scale=2; $zram_util / $zram_count" | bc)
       zram_json=$(create_device_json "zram" "$zram_r_s" "$zram_rkB_s" "$zram_w_s" "$zram_wkB_s" "$avg_util")
       json_message="{$sda_json, $zram_json}"
-      /usr/bin/mosquitto_pub -h "$BROKER" -t "$TOPIC" -m "$json_message"
+      /usr/bin/mosquitto_pub -h "$BROKER" -u "${MQTT_USER}" -P "${MQTT_PWD}" -t "$TOPIC" -m "$json_message"
 #      echo "$json_message"
 
       # Reset

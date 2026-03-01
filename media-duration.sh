@@ -29,5 +29,5 @@ echo "  \"Podcasts\": $(duration /volume1/Audio/podcast)"
 echo "}";
 )
 
-echo $output
-/opt/bin/mosquitto_pub -h oramicro1.alpine-blues.ts.net -t "homeassistant/sensor/Astor/Media/Duration" -m "$output"
+#echo $output
+/opt/bin/mosquitto_pub -h oramicro2.alpine-blues.ts.net -u "${MQTT_USER}" -P "${MQTT_PWD}" -t "homeassistant/sensor/Astor/Media/Duration" -m "$output"

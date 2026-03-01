@@ -1,5 +1,7 @@
 #!/bin/bash
 
+MQTT_BROKER="oramicro2.alpine-blues.ts.net"
+
 LSW=""
 LSR=""
 PUEI=""
@@ -20,4 +22,4 @@ GBR=$( echo $GBR / 2048 / 1024 | bc -l);
 GBW=$( echo $GBW / 2048 / 1024 | bc -l);
 json="{\"$2\":{\"GBR\":\"$GBR\",\"GBW\":\"$GBW\",\"PUEI\":\"$PUEI\"}}"
 #echo $json | jq
-/usr/bin/mosquitto_pub  -h 10.14.14.100 -t "homeassistant/sensor/$1/smartctl/$2" -m "$json"
+/usr/bin/mosquitto_pub  -h "${MQTT_BROKER}" -u "${MQTT_USER}" -P "${MQTT_PWD}" -t "homeassistant/sensor/$1/smartctl/$2" -m "$json"
