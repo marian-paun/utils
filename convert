@@ -344,7 +344,7 @@ if [[ $NUM_CUE -eq 1 && $NUM_AUDIO -eq 1 ]]; then
 
 
                 # --- Build and run ffmpeg command ---
-                cmd=(ffmpeg -nostdin -hide_banner -loglevel error -stats -y)
+                cmd=(ffmpeg -nostdin -hide_banner -loglevel error -stats -y -progress pipe:1)
 
                 # Add main audio file
                 cmd+=(-i "$AUDIO_FILE") # Input 0
@@ -375,11 +375,37 @@ if [[ $NUM_CUE -eq 1 && $NUM_AUDIO -eq 1 ]]; then
                 # Add encoding options and output file
                 cmd+=(-c:a "$AUDIO_CODEC" $AUDIO_QUALITY -movflags +faststart "$output")
 
+                # Parse chapters for real-time reporting
+                mapfile -t CHAPTER_TIMES < <(grep '^START=' "$metadata_file" | cut -d= -f2-)
+                mapfile -t CHAPTER_TITLES < <(grep '^title=' "$metadata_file" | cut -d= -f2-)
+
+                # Function to report chapter progress
+                report_chapter_progress() {
+                    local current_chap_idx=-1
+                    while read -r line; do
+                        if [[ "$line" =~ out_time_ms=([0-9]+) ]]; then
+                            local ms=$(( ${BASH_REMATCH[1]} / 1000 ))
+                            local new_idx=$current_chap_idx
+                            for ((i=${#CHAPTER_TIMES[@]}-1; i>=0; i--)); do
+                                if (( ms >= ${CHAPTER_TIMES[$i]} )); then
+                                    new_idx=$i
+                                    break
+                                fi
+                            done
+                            if (( new_idx != current_chap_idx )); then
+                                current_chap_idx=$new_idx
+                                echo -e "\n>>> Now processing: ${CHAPTER_TITLES[$current_chap_idx]}" >&2
+                            fi
+                        fi
+                    done
+                }
+
                 echo "Executing ffmpeg with generated chapter metadata..." >&2
-                if "${cmd[@]}"; then
-                    echo "Successfully finished: $(basename "$output")" >&2
+                "${cmd[@]}" | report_chapter_progress
+                if [[ ${PIPESTATUS[0]} -eq 0 ]]; then
+                    echo -e "\nSuccessfully finished: $(basename "$output")" >&2
                 else
-                    echo "Error converting: $(basename "$AUDIO_FILE")" >&2
+                    echo -e "\nError converting: $(basename "$AUDIO_FILE")" >&2
                     [[ -f "$output" ]] && rm "$output"
                 fi
                 # Clean up metadata file
