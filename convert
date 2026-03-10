@@ -66,6 +66,28 @@ build_cover_art_args() {
     echo "${art_args[@]}"
 }
 
+# Function to report chapter progress during ffmpeg execution.
+# Expects CHAPTER_TIMES and CHAPTER_TITLES arrays to be populated.
+report_chapter_progress() {
+    local current_chap_idx=-1
+    while read -r line; do
+        if [[ "$line" =~ out_time_ms=([0-9]+) ]]; then
+            local ms=$(( ${BASH_REMATCH[1]} / 1000 ))
+            local new_idx=$current_chap_idx
+            for ((i=${#CHAPTER_TIMES[@]}-1; i>=0; i--)); do
+                if (( ms >= ${CHAPTER_TIMES[$i]} )); then
+                    new_idx=$i
+                    break
+                fi
+            done
+            if (( new_idx > current_chap_idx )); then
+                current_chap_idx=$new_idx
+                echo -e "\n>>> Now processing: ${CHAPTER_TITLES[$current_chap_idx]}" >&2
+            fi
+        fi
+    done
+}
+
 # Convert a single audio file to the target format.
 #
 # $1: Path to the input audio file.
@@ -133,7 +155,7 @@ convert_single_file() {
 # ==============================================================================
 
 # 1. Get and validate input folder
-SEARCH_DIR="${1:-.}"
+SEARCH_DIR=$(realpath "${1:-.}")
 if [[ ! -d "$SEARCH_DIR" ]]; then
     echo "Error: Directory '$SEARCH_DIR' does not exist." >&2
     echo "Usage: $0 [input_folder_path]" >&2
@@ -162,9 +184,9 @@ for tool in ffmpeg ffprobe; do
 done
 
 # 3. Discover all relevant files in the target directory
-mapfile -d '' CUE_FILES < <(find "$SEARCH_DIR" -maxdepth 1 -type f -iname "*.cue" -print0)
-mapfile -d '' FLAC_FILES < <(find "$SEARCH_DIR" -maxdepth 1 -type f -iname "*.flac" -print0)
-mapfile -d '' MP3_FILES < <(find "$SEARCH_DIR" -maxdepth 1 -type f -iname "*.mp3" -print0)
+mapfile -d '' CUE_FILES < <(find "$SEARCH_DIR" -maxdepth 1 -type f -iname "*.cue" -print0 | sort -z)
+mapfile -d '' FLAC_FILES < <(find "$SEARCH_DIR" -maxdepth 1 -type f -iname "*.flac" -print0 | sort -z)
+mapfile -d '' MP3_FILES < <(find "$SEARCH_DIR" -maxdepth 1 -type f -iname "*.mp3" -print0 | sort -z)
 
 NUM_CUE=${#CUE_FILES[@]}
 NUM_FLAC=${#FLAC_FILES[@]}
@@ -360,7 +382,6 @@ if [[ $NUM_CUE -eq 1 && $NUM_AUDIO -eq 1 ]]; then
                     cmd+=(-map 0:a -map 2:v -c:v mjpeg -disposition:v:0 attached_pic -map_metadata 1 -map_chapters 1)
                 else
                     # No external cover. Check for embedded video in AUDIO_FILE (Input 0)
-                    local has_embedded
                     has_embedded=$(ffprobe -v quiet -select_streams v -show_entries stream=index -of csv=p=0 "$AUDIO_FILE" | head -n 1)
                     if [[ -n "$has_embedded" ]]; then
                         # Map audio from input 0, embedded video from input 0, metadata from input 1 (chapters)
@@ -378,27 +399,6 @@ if [[ $NUM_CUE -eq 1 && $NUM_AUDIO -eq 1 ]]; then
                 # Parse chapters for real-time reporting
                 mapfile -t CHAPTER_TIMES < <(grep '^START=' "$metadata_file" | cut -d= -f2-)
                 mapfile -t CHAPTER_TITLES < <(grep '^title=' "$metadata_file" | cut -d= -f2-)
-
-                # Function to report chapter progress
-                report_chapter_progress() {
-                    local current_chap_idx=-1
-                    while read -r line; do
-                        if [[ "$line" =~ out_time_ms=([0-9]+) ]]; then
-                            local ms=$(( ${BASH_REMATCH[1]} / 1000 ))
-                            local new_idx=$current_chap_idx
-                            for ((i=${#CHAPTER_TIMES[@]}-1; i>=0; i--)); do
-                                if (( ms >= ${CHAPTER_TIMES[$i]} )); then
-                                    new_idx=$i
-                                    break
-                                fi
-                            done
-                            if (( new_idx != current_chap_idx )); then
-                                current_chap_idx=$new_idx
-                                echo -e "\n>>> Now processing: ${CHAPTER_TITLES[$current_chap_idx]}" >&2
-                            fi
-                        fi
-                    done
-                }
 
                 echo "Executing ffmpeg with generated chapter metadata..." >&2
                 "${cmd[@]}" | report_chapter_progress
@@ -418,7 +418,153 @@ if [[ $NUM_CUE -eq 1 && $NUM_AUDIO -eq 1 ]]; then
             ;;
     esac
 else
+    # Check for multiple FLACs to offer merging
+    if [[ $NUM_FLAC -gt 1 ]]; then
+        echo "------------------------------------------------------------" >&2
+        echo "Detected multiple FLAC files ($NUM_FLAC files)." >&2
+        read -p "Convert to individual files (i) or a single multi-chapter file (m)? [i/m]: " choice
+        if [[ "$choice" == "m" || "$choice" == "M" ]]; then
+            echo "Merging into a single .m4a file with chapters..." >&2
+
+            # Start timer for statistics
+            start_time=$(date +%s)
+
+            # Use the folder name as the default filename if info.txt Album is not set
+            album_name="${METADATA_FROM_INFO["Album"]}"
+            [[ -z "$album_name" ]] && album_name=$(basename "$SEARCH_DIR")
+            [[ "$album_name" == "." ]] && album_name=$(basename "$(pwd)")
+
+            output="$SEARCH_DIR/$album_name.$OUTPUT_EXT"
+
+            if [[ -f "$output" ]]; then
+                echo "Skipping (output exists: $(basename "$output"))" >&2
+            else
+                # Create concat file and metadata file
+                concat_file=$(mktemp -p "$TEMP_BASE_DIR")
+                metadata_file=$(mktemp -p "$TEMP_BASE_DIR")
+
+                # Function to escape metadata for FFMETADATA format
+                escape_metadata() {
+                    echo "$1" | sed -e 's/\\/\\\\/g' -e 's/=/\\=/g' -e 's/;/\\;/g' -e 's/#/\\#/g' -e 's/$/\\/' -e '$ s/\\$//'
+                }
+
+                echo ";FFMETADATA1" > "$metadata_file"
+                # Add album-level metadata
+                [[ -n "${METADATA_FROM_INFO["Artist"]}" ]] && echo "artist=$(escape_metadata "${METADATA_FROM_INFO["Artist"]}")" >> "$metadata_file"
+                [[ -n "${METADATA_FROM_INFO["Album"]}" ]] && echo "album=$(escape_metadata "${METADATA_FROM_INFO["Album"]}")" >> "$metadata_file"
+                [[ -n "${METADATA_FROM_INFO["Year"]}" ]] && echo "date=$(escape_metadata "${METADATA_FROM_INFO["Year"]}")" >> "$metadata_file"
+                [[ -n "${METADATA_FROM_INFO["Genre"]}" ]] && echo "genre=$(escape_metadata "${METADATA_FROM_INFO["Genre"]}")" >> "$metadata_file"
+
+                current_time_ms=0
+                CHAPTER_TIMES=()
+                CHAPTER_TITLES=()
+
+                echo "Calculating track durations and preparing metadata..." >&2
+                for f in "${FLAC_FILES[@]}"; do
+                    # Escape single quotes for ffmpeg concat file.
+                    # The format is: file 'path' where any ' inside path is replaced by '\''
+                    # This is robust because we use printf and bash parameter expansion.
+                    p="$f"
+                    p="${p//\'/\'\\\'\'}"
+                    printf "file '%s'\n" "$p" >> "$concat_file"
+
+                    # Duration in ms - ensure it's at least 0 if ffprobe fails
+                    duration_ms=$(ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "$f" | awk '{printf "%.0f", $1 * 1000}')
+                    [[ -z "$duration_ms" ]] && duration_ms=0
+
+                    # Title
+                    title=$(ffprobe -v error -show_entries format_tags=title -of default=noprint_wrappers=1:nokey=1 "$f" | head -n 1)
+                    [[ -z "$title" ]] && title=$(basename "$f" .flac)
+
+                    echo "" >> "$metadata_file"
+                    echo "[CHAPTER]" >> "$metadata_file"
+                    echo "TIMEBASE=1/1000" >> "$metadata_file"
+                    echo "START=$current_time_ms" >> "$metadata_file"
+                    CHAPTER_TIMES+=("$current_time_ms")
+                    CHAPTER_TITLES+=("$title")
+                    current_time_ms=$((current_time_ms + duration_ms))
+                    echo "END=$((current_time_ms - 1))" >> "$metadata_file"
+                    echo "title=$(escape_metadata "$title")" >> "$metadata_file"
+                done
+
+                # Cover art
+                cover=$(find_cover_art "$SEARCH_DIR")
+                temp_cover=""
+
+                # Build ffmpeg command
+                cmd=(ffmpeg -nostdin -hide_banner -loglevel error -stats -y -progress pipe:1)
+                cmd+=(-f concat -safe 0 -i "$concat_file") # Input 0
+                cmd+=(-i "$metadata_file") # Input 1
+
+                if [[ -n "$cover" ]]; then
+                    echo "Adding external cover: $(basename "$cover")" >&2
+                    cmd+=(-i "$cover") # Input 2
+                    cmd+=(-map 0:a -map 2:v -c:v mjpeg -disposition:v:0 attached_pic -map_metadata 1 -map_chapters 1)
+                else
+                    # Check for embedded art in the FIRST flac file
+                    # We extract it to a temporary file to avoid issues with concat demuxer
+                    # trying to concatenate video streams that might not be consistent.
+                    has_embedded=$(ffprobe -v quiet -select_streams v -show_entries stream=index -of csv=p=0 "${FLAC_FILES[0]}" | head -n 1)
+                    if [[ -n "$has_embedded" ]]; then
+                         echo "Extracting embedded cover art from first track..." >&2
+                         temp_cover=$(mktemp -p "$TEMP_BASE_DIR" --suffix=.jpg)
+                         if ffmpeg -hide_banner -loglevel error -i "${FLAC_FILES[0]}" -map 0:v:0 -c copy "$temp_cover" -y; then
+                             cmd+=(-i "$temp_cover") # Input 2
+                             cmd+=(-map 0:a -map 2:v -c:v mjpeg -disposition:v:0 attached_pic -map_metadata 1 -map_chapters 1)
+                         else
+                             echo "Warning: Failed to extract embedded art. Proceeding without cover." >&2
+                             cmd+=(-map 0:a -map_metadata 1 -map_chapters 1)
+                             temp_cover=""
+                         fi
+                    else
+                         cmd+=(-map 0:a -map_metadata 1 -map_chapters 1)
+                    fi
+                fi
+
+                cmd+=(-c:a "$AUDIO_CODEC" $AUDIO_QUALITY -movflags +faststart "$output")
+
+                echo "Executing ffmpeg to merge files..." >&2
+                "${cmd[@]}" | report_chapter_progress
+
+                if [[ ${PIPESTATUS[0]} -eq 0 ]]; then
+                    end_time=$(date +%s)
+                    elapsed=$((end_time - start_time))
+                    
+                    # Format duration for display
+                    total_sec=$((current_time_ms / 1000))
+                    h=$((total_sec / 3600))
+                    m=$(( (total_sec % 3600) / 60 ))
+                    s=$((total_sec % 60))
+                    
+                    echo -e "\n------------------------------------------------------------" >&2
+                    echo "Merge Statistics:" >&2
+                    echo "  Tracks processed: ${#FLAC_FILES[@]}" >&2
+                    echo "  Total duration:   $(printf "%02d:%02d:%02d" $h $m $s)" >&2
+                    echo "  Output file:      $(basename "$output")" >&2
+                    if [[ -f "$output" ]]; then
+                        size=$(du -h "$output" | cut -f1)
+                        echo "  Output size:      $size" >&2
+                    fi
+                    echo "  Time elapsed:     ${elapsed}s" >&2
+                    echo "------------------------------------------------------------" >&2
+                    echo "Successfully finished: $(basename "$output")" >&2
+                else
+                    echo -e "\nError merging files" >&2
+                    [[ -f "$output" ]] && rm "$output"
+                fi
+
+                rm "$concat_file" "$metadata_file"
+                [[ -n "$temp_cover" && -f "$temp_cover" ]] && rm "$temp_cover"
+            fi
+            echo "------------------------------------------------------------" >&2
+            echo "Batch conversion complete." >&2
+            echo "------------------------------------------------------------" >&2
+            exit 0
+        fi
+    fi
+
     # --- DEFAULT BEHAVIOR: Convert all found audio files one-by-one ---
+
     mapfile -d '' ALL_FILES < <(find "$SEARCH_DIR" -type f \( -iname "*.flac" -o -iname "*.mp3" \) -print0)
     TOTAL_FILES=${#ALL_FILES[@]}
 
