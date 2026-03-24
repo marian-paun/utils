@@ -16,6 +16,7 @@ process_storage() {
     # Accumulate totals
     total_count=$((total_count + count))
     total_bytes=$((total_bytes + bytes))
+#    echo $1: $total_count $total_bytes
   fi
 }
 
@@ -61,5 +62,7 @@ process_storage "pcloud_marian_paun_live_com:";
 # Create the final JSON output
 final_json="{\"total_count\":$total_count,\"total_bytes\":$total_bytes}";
 
+echo $final_json
+
 # Send the final JSON output to Mosquitto
-/usr/bin/mosquitto_pub -h "${MQTT_BROWSER}" -u "${MQTT_USER}" -P "${MQTT_PWD}" -t "homeassistant/sensor/cloud" -m "$final_json";
+/usr/bin/mosquitto_pub -h "${MQTT_BROKER}" -u "${MQTT_USER}" -P "${MQTT_PWD}" -t "homeassistant/sensor/cloud" -m "$final_json";

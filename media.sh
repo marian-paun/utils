@@ -1,5 +1,7 @@
 #!/bin/sh
 
+MQTT_TOPIC="homeassistant/sensor/Astor/Media"
+
 get_size() {
     du -sm $1 2>/dev/null | cut -f1 || echo "0"
 }
@@ -20,5 +22,5 @@ echo "  \"Magazines\": \"$(get_size /volume1/Media/Magazines)\",";
 echo "  \"Photo\": \"$(get_size /volume1/PhotoGallery)\"}";
 )
 
-/opt/bin/mosquitto_pub -h oramicro2.alpine-blues.ts.net -u "${MQTT_USER}" -P "${MQTT_PWD}" -t "homeassistant/sensor/Astor/Media" -m "$output"
+/opt/bin/mosquitto_pub -h "${MQTT_BROKER}" -u "${MQTT_USER}" -P "${MQTT_PWD}" -t "${MQTT_TOPIC}" -m "$output"
 echo "$output"
