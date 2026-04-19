@@ -25,7 +25,7 @@ echo "  \"Soundtracks\": $(duration /volume1/Audio/Music/Soundtrack),"
 echo "  \"Classical\": $(duration /volume1/Audio/Music/Classical),"
 echo "  \"Various\": $(duration /volume1/Audio/Music/Various),"
 echo "  \"Audiobooks\": $(duration /volume1/Audio/Audiobooks),"
-echo "  \"Podcasts\": $(duration /volume1/Audio/podcast)"
+echo "  \"Podcasts\": $(duration /volume1/Audio/podcasts)"
 echo "}";
 )
 

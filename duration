@@ -1,0 +1,13 @@
+#!/usr/bin/bash
+
+# Initialize the total duration variable
+total_duration=0
+# Set the internal field separator to newline to handle filenames with spaces
+IFS=$'\n'
+# Loop through each media file in the directory
+for media_file in $(find "$1" -type f -regex '.*\.\(mkv\|avi\|mp4\|mov\|mp3\|m4a\|m4b\|opus\)$')
+  do
+    duration=$(/usr/bin/mediainfo --Inform="General;%Duration%" "$media_file")
+    total_duration=$((total_duration + $((duration/1000))))
+  done
+echo $total_duration | awk '{printf "%.2f\n", $1/3600}'
