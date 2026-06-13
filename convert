@@ -1,35 +1,136 @@
 #!/bin/bash
 
 # ==============================================================================
-# CONFIGURATION
+# CONFIGURATION & DEFAULTS
 # ==============================================================================
 AUDIO_QUALITY="-q:a 2"
 AUDIO_CODEC="aac"
 OUTPUT_EXT="m4a"
+OUTPUT_MODE="" # Will be prompted if not set via flag
+DRY_RUN=false
+TEMPORARY_ITEMS=()
+
+# ==============================================================================
+# ERROR HANDLING & CLEANUP
+# ==============================================================================
+
+cleanup() {
+    local exit_code=$?
+    if [[ ${#TEMPORARY_ITEMS[@]} -gt 0 ]]; then
+        echo -e "\nCleaning up temporary items..." >&2
+        for item in "${TEMPORARY_ITEMS[@]}"; do
+            [[ -e "$item" ]] && rm -rf "$item"
+        done
+    fi
+    exit "$exit_code"
+}
+
+# Ensure cleanup happens on exit or interruption
+trap cleanup EXIT INT TERM
 
 # ==============================================================================
 # HELPER FUNCTIONS
 # ==============================================================================
 
-# Find the best available cover art file in a directory.
-# Prioritizes common names like cover.jpg, folder.jpg, etc.
-#
-# $1: Directory to search in.
-# Returns: The path to the best found cover file, or empty string if none.
-find_cover_art() {
-    local search_dir="$1"
-    local cover=""
-    # Prioritized list of common cover art filenames
-    for pattern in "cover.jpg" "cover.jpeg" "cover.png" "folder.jpg" "folder.png" "front.jpg" "front.png" "*.jpg" "*.png"; do
-        # Find the first file matching the pattern in the directory
-        local found
-        found=$(find "$search_dir" -maxdepth 1 -type f -iname "$pattern" -print -quit)
-        if [[ -n "$found" ]]; then
-            cover="$found"
-            break
+usage() {
+    cat <<EOF
+Usage: $(basename "$0") [OPTIONS] [INPUT_FOLDER]
+
+Options:
+  -m MODE      Output mode: 'individual' (i) or 'multi-chapter' (m)
+  -q QUALITY   Audio quality for ffmpeg (default: "-q:a 2")
+  -h           Show this help message
+
+If INPUT_FOLDER is not provided, the current directory is used.
+If -m is not provided, the script will prompt for the mode.
+EOF
+    exit 0
+}
+
+# Parse command line options
+while getopts "m:q:h" opt; do
+    case "$opt" in
+        m)
+            case "$OPTARG" in
+                i|individual) OUTPUT_MODE="individual" ;;
+                m|multi-chapter) OUTPUT_MODE="multi-chapter" ;;
+                *) echo "Error: Invalid mode '$OPTARG'. Use 'i' or 'm'." >&2; exit 1 ;;
+            esac
+            ;;
+        q) AUDIO_QUALITY="$OPTARG" ;;
+        h) usage ;;
+        *) usage ;;
+    esac
+done
+shift $((OPTIND - 1))
+
+# Check for required tools
+check_dependencies() {
+    local tools=(ffmpeg ffprobe)
+    for tool in "${tools[@]}"; do
+        if ! command -v "$tool" >/dev/null 2>&1; then
+            echo "Error: Required tool '$tool' is not installed." >&2
+            exit 1
         fi
     done
-    echo "$cover"
+}
+check_dependencies
+
+# Trim leading/trailing whitespace and quotes from a string
+trim_string() {
+    local var="$*"
+    # Remove leading whitespace
+    var="${var#"${var%%[![:space:]]*}"}"
+    # Remove trailing whitespace
+    var="${var%"${var##*[![:space:]]}"}"
+    # Remove leading/trailing quotes
+    var="${var#\"}"
+    var="${var%\"}"
+    printf '%s' "$var"
+}
+
+# Find the best available cover art file in a directory.
+find_cover_art() {
+    local search_dir="$1"
+    # Single find call with OR logic is more efficient
+    find "$search_dir" -maxdepth 1 -type f \( \
+        -iname "cover.jpg" -o -iname "cover.jpeg" -o -iname "cover.png" -o \
+        -iname "folder.jpg" -o -iname "folder.png" -o \
+        -iname "front.jpg" -o -iname "front.png" -o \
+        -iname "*.jpg" -o -iname "*.png" \
+    \) -print -quit
+}
+
+# Parse info.txt for metadata with validation
+parse_info_file() {
+    local info_file="$1"
+    [[ ! -f "$info_file" ]] && return
+
+    printf "Parsing metadata from: %s\n" "$(basename "$info_file")" >&2
+    while IFS='=' read -r key value || [[ -n "$key" ]]; do
+        [[ "$key" =~ ^[[:space:]]*# ]] && continue # Skip comments
+        [[ -z "$key" ]] && continue                # Skip empty lines
+
+        key=$(trim_string "$key")
+        value=$(trim_string "$value")
+
+        if [[ -n "$key" ]]; then
+            METADATA_FROM_INFO["$key"]="$value"
+        fi
+    done < "$info_file"
+}
+
+# Construct ffmpeg metadata arguments from a map
+# $1: Name of the associative array (e.g., METADATA_FROM_INFO)
+get_metadata_args() {
+    local -n metadata_map="$1"
+    local args=()
+    # Map info.txt keys to ffmpeg metadata keys
+    [[ -n "${metadata_map["Artist"]}" ]] && args+=("-metadata" "artist=${metadata_map["Artist"]}")
+    [[ -n "${metadata_map["Album"]}" ]]  && args+=("-metadata" "album=${metadata_map["Album"]}")
+    [[ -n "${metadata_map["Year"]}" ]]   && args+=("-metadata" "date=${metadata_map["Year"]}")
+    [[ -n "${metadata_map["Genre"]}" ]]  && args+=("-metadata" "genre=${metadata_map["Genre"]}")
+    printf '%s\0' "${args[@]}"
 }
 
 # Construct the part of the ffmpeg command responsible for adding cover art.
@@ -70,6 +171,7 @@ build_cover_art_args() {
 # Expects CHAPTER_TIMES and CHAPTER_TITLES arrays to be populated.
 report_chapter_progress() {
     local current_chap_idx=-1
+    local total_chapters=${#CHAPTER_TITLES[@]}
     while read -r line; do
         if [[ "$line" =~ out_time_ms=([0-9]+) ]]; then
             local ms=$(( ${BASH_REMATCH[1]} / 1000 ))
@@ -82,7 +184,7 @@ report_chapter_progress() {
             done
             if (( new_idx > current_chap_idx )); then
                 current_chap_idx=$new_idx
-                echo -e "\n>>> Now processing: ${CHAPTER_TITLES[$current_chap_idx]}" >&2
+                echo -e "\nProcessing chapter $((current_chap_idx + 1)) of $total_chapters: ${CHAPTER_TITLES[$current_chap_idx]}" >&2
             fi
         fi
     done
@@ -93,44 +195,32 @@ report_chapter_progress() {
 # $1: Path to the input audio file.
 # $2: Path for the output audio file.
 # $3: (Optional) Path to an external cover art file.
-# $4: (Optional) Associative array of metadata to add (e.g., METADATA_FROM_INFO)
+# $4: (Optional) Name of the associative array of metadata
 convert_single_file() {
     local input="$1"
     local output="$2"
-    local cover_file="$3" # Optional external cover
-    # Need to pass associative array by name for indirect expansion
-    local -n metadata_map="$4"
+    local cover_file="$3"
+    local metadata_map_name="$4"
 
     if [[ -f "$output" ]]; then
-        echo "Skipping (output exists: $(basename "$output"))" >&2
+        printf "Skipping (output exists: %s)\n" "$(basename "$output")" >&2
         return
     fi
 
-    echo "Processing: $(basename "$input") -> $(basename "$output")" >&2
+    printf "Processing: %s -> %s\n" "$(basename "$input")" "$(basename "$output")" >&2
 
     # Base ffmpeg command
     local cmd=(ffmpeg -hide_banner -loglevel error -stats -y -i "$input")
 
     # Add metadata from info.txt if provided
-    local info_metadata_args=()
-    if [[ -n "${metadata_map["Artist"]}" ]]; then
-        info_metadata_args+=("-metadata" "artist=${metadata_map["Artist"]}")
+    if [[ -n "$metadata_map_name" ]]; then
+        mapfile -d '' info_metadata_args < <(get_metadata_args "$metadata_map_name")
+        cmd+=("${info_metadata_args[@]}")
     fi
-    if [[ -n "${metadata_map["Album"]}" ]]; then
-        info_metadata_args+=("-metadata" "album=${metadata_map["Album"]}")
-    fi
-    if [[ -n "${metadata_map["Year"]}" ]]; then
-        info_metadata_args+=("-metadata" "date=${metadata_map["Year"]}")
-    fi
-    if [[ -n "${metadata_map["Genre"]}" ]]; then
-        info_metadata_args+=("-metadata" "genre=${metadata_map["Genre"]}")
-    fi
-    cmd+=("${info_metadata_args[@]}")
 
     # Get cover art arguments
     local art_args_str
     art_args_str=$(build_cover_art_args "$input" "$cover_file")
-    # Convert string back to array
     local art_args
     read -r -a art_args <<< "$art_args_str"
 
@@ -141,10 +231,9 @@ convert_single_file() {
 
     # Execute the conversion
     if "${cmd[@]}"; then
-        echo "Successfully finished: $(basename "$output")" >&2
+        printf "Successfully finished: %s\n" "$(basename "$output")" >&2
     else
-        echo "Error converting: $(basename "$input")" >&2
-        # Clean up failed output file
+        printf "Error converting: %s\n" "$(basename "$input")" >&2
         [[ -f "$output" ]] && rm "$output"
     fi
 }
@@ -158,8 +247,18 @@ convert_single_file() {
 SEARCH_DIR=$(realpath "${1:-.}")
 if [[ ! -d "$SEARCH_DIR" ]]; then
     echo "Error: Directory '$SEARCH_DIR' does not exist." >&2
-    echo "Usage: $0 [input_folder_path]" >&2
     exit 1
+fi
+
+# Determine output mode if not provided via flag
+if [[ -z "$OUTPUT_MODE" ]]; then
+    echo -n "Do you want individual files or a multi-chapter file? [i/m]: "
+    read -r OUTPUT_MODE_INPUT
+    case "$OUTPUT_MODE_INPUT" in
+        i|I) OUTPUT_MODE="individual" ;;
+        m|M) OUTPUT_MODE="multi-chapter" ;;
+        *) echo "Invalid choice. Please enter 'i' for individual or 'm' for multi-chapter." >&2; exit 1 ;;
+    esac
 fi
 
 # Determine temporary directory
@@ -169,24 +268,14 @@ if [[ -d "/temp" ]]; then
 elif [[ -d "/tmp" ]]; then
     TEMP_BASE_DIR="/tmp"
 else
-    # Fallback to current directory if neither /temp nor /tmp exists
     TEMP_BASE_DIR="$(pwd)"
     echo "Warning: /temp and /tmp not found. Using current directory for temporary files." >&2
 fi
 
-
-# 2. Check for required tools
-for tool in ffmpeg ffprobe; do
-    if ! command -v "$tool" >/dev/null 2>&1; then
-        echo "Error: Required tool '$tool' is not installed." >&2
-        exit 1
-    fi
-done
-
-# 3. Discover all relevant files in the target directory
-mapfile -d '' CUE_FILES < <(find "$SEARCH_DIR" -maxdepth 1 -type f -iname "*.cue" -print0 | sort -z)
-mapfile -d '' FLAC_FILES < <(find "$SEARCH_DIR" -maxdepth 1 -type f -iname "*.flac" -print0 | sort -z)
-mapfile -d '' MP3_FILES < <(find "$SEARCH_DIR" -maxdepth 1 -type f -iname "*.mp3" -print0 | sort -z)
+# 3. Discover all relevant files in the target directory (recursively)
+mapfile -d '' CUE_FILES < <(find "$SEARCH_DIR" -type f -iname "*.cue" -print0 | sort -z --version-sort)
+mapfile -d '' FLAC_FILES < <(find "$SEARCH_DIR" -type f -iname "*.flac" -print0 | sort -z --version-sort)
+mapfile -d '' MP3_FILES < <(find "$SEARCH_DIR" -type f -iname "*.mp3" -print0 | sort -z --version-sort)
 
 NUM_CUE=${#CUE_FILES[@]}
 NUM_FLAC=${#FLAC_FILES[@]}
@@ -195,19 +284,7 @@ NUM_AUDIO=$((NUM_FLAC + NUM_MP3))
 
 # Parse info.txt for metadata
 declare -A METADATA_FROM_INFO # Associative array for key-value pairs
-INFO_FILE="$SEARCH_DIR/info.txt"
-
-if [[ -f "$INFO_FILE" ]]; then
-    echo "Found info.txt, parsing metadata..." >&2
-    while IFS='=' read -r key value; do
-        # Clean up whitespace and quotes
-        key=$(echo "$key" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')
-        value=$(echo "$value" | sed -e 's/^"//' -e 's/"$//' -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')
-        if [[ -n "$key" && -n "$value" ]]; then
-            METADATA_FROM_INFO["$key"]="$value"
-        fi
-    done < "$INFO_FILE"
-fi
+parse_info_file "$SEARCH_DIR/info.txt"
 
 # 4. Check for the special CUE sheet + single audio file scenario
 if [[ $NUM_CUE -eq 1 && $NUM_AUDIO -eq 1 ]]; then
@@ -221,8 +298,12 @@ if [[ $NUM_CUE -eq 1 && $NUM_AUDIO -eq 1 ]]; then
     echo "  Audio File: $(basename "$AUDIO_FILE")" >&2
     echo "------------------------------------------------------------" >&2
 
-    # Ask user for action
-    read -p "Split into individual tracks (s) or create a single file with chapters (c)? [s/c]: " choice
+     # Determine action based on user preference
+     if [[ "$OUTPUT_MODE" == "individual" ]]; then
+         choice="s"
+     else
+         choice="c"
+     fi
 
     dir=$(dirname "$AUDIO_FILE")
     cover=$(find_cover_art "$dir")
@@ -238,13 +319,16 @@ if [[ $NUM_CUE -eq 1 && $NUM_AUDIO -eq 1 ]]; then
             echo "Splitting album using shntool..." >&2
             # Create a temporary directory for split files
             split_dir=$(mktemp -d -p "$TEMP_BASE_DIR")
+            TEMPORARY_ITEMS+=("$split_dir")
             # Use shnsplit to create tagged flac files
             shnsplit -d "$split_dir" -f "$CUE_FILE" -t "%n - %t" -o flac "$AUDIO_FILE"
 
-            echo "Converting split tracks to .$OUTPUT_EXT..." >&2
-            for track_flac in "$split_dir"/*.flac; do
-                filename=$(basename "$track_flac" .flac)
-                output_file="$dir/$filename.$OUTPUT_EXT"
+echo "Converting split tracks to .$OUTPUT_EXT..." >&2
+             # Create an array of split files and sort them numerically by track number
+             mapfile -d '' split_tracks < <(find "$split_dir" -maxdepth 1 -type f -name "*.flac" -print0 | sort -z --version-sort)
+             for track_flac in "${split_tracks[@]}"; do
+                 filename=$(basename "$track_flac" .flac)
+                 output_file="$dir/$filename.$OUTPUT_EXT"
 
                 if [[ -f "$output_file" ]]; then
                     echo "Skipping (output exists: $(basename "$output_file"))" >&2
@@ -305,6 +389,7 @@ if [[ $NUM_CUE -eq 1 && $NUM_AUDIO -eq 1 ]]; then
             else
                 # Create ffmpeg metadata file from CUE sheet
                 metadata_file=$(mktemp -p "$TEMP_BASE_DIR")
+                TEMPORARY_ITEMS+=("$metadata_file")
                 echo ";FFMETADATA1" > "$metadata_file"
 
                 # Extract album-level metadata, removing CRLF if present
@@ -421,8 +506,13 @@ else
     # Check for multiple FLACs to offer merging
     if [[ $NUM_FLAC -gt 1 ]]; then
         echo "------------------------------------------------------------" >&2
-        echo "Detected multiple FLAC files ($NUM_FLAC files)." >&2
-        read -p "Convert to individual files (i) or a single multi-chapter file (m)? [i/m]: " choice
+         echo "Detected multiple FLAC files ($NUM_FLAC files)." >&2
+         # Determine action based on user preference
+         if [[ "$OUTPUT_MODE" == "individual" ]]; then
+             choice="i"
+         else
+             choice="m"
+         fi
         if [[ "$choice" == "m" || "$choice" == "M" ]]; then
             echo "Merging into a single .m4a file with chapters..." >&2
 
@@ -442,6 +532,7 @@ else
                 # Create concat file and metadata file
                 concat_file=$(mktemp -p "$TEMP_BASE_DIR")
                 metadata_file=$(mktemp -p "$TEMP_BASE_DIR")
+                TEMPORARY_ITEMS+=("$concat_file" "$metadata_file")
 
                 # Function to escape metadata for FFMETADATA format
                 escape_metadata() {
@@ -508,6 +599,7 @@ else
                     if [[ -n "$has_embedded" ]]; then
                          echo "Extracting embedded cover art from first track..." >&2
                          temp_cover=$(mktemp -p "$TEMP_BASE_DIR" --suffix=.jpg)
+                         TEMPORARY_ITEMS+=("$temp_cover")
                          if ffmpeg -hide_banner -loglevel error -i "${FLAC_FILES[0]}" -map 0:v:0 -c copy "$temp_cover" -y; then
                              cmd+=(-i "$temp_cover") # Input 2
                              cmd+=(-map 0:a -map 2:v -c:v mjpeg -disposition:v:0 attached_pic -map_metadata 1 -map_chapters 1)
@@ -563,18 +655,25 @@ else
         fi
     fi
 
-    # --- DEFAULT BEHAVIOR: Convert all found audio files one-by-one ---
+     # --- DEFAULT BEHAVIOR: Convert all found audio files one-by-one ---
 
-    mapfile -d '' ALL_FILES < <(find "$SEARCH_DIR" -type f \( -iname "*.flac" -o -iname "*.mp3" \) -print0)
-    TOTAL_FILES=${#ALL_FILES[@]}
+     mapfile -d '' ALL_FILES < <(find "$SEARCH_DIR" -type f \( -iname "*.flac" -o -iname "*.mp3" \) -print0 | sort -z --version-sort)
+     TOTAL_FILES=${#ALL_FILES[@]}
 
-    if [[ $TOTAL_FILES -eq 0 ]]; then
-        echo "No .flac or .mp3 files found in '$SEARCH_DIR'." >&2
-        exit 0
-    fi
+     if [[ $TOTAL_FILES -eq 0 ]]; then
+         echo "No .flac or .mp3 files found in '$SEARCH_DIR'." >&2
+         exit 0
+     fi
 
-    echo "Found $TOTAL_FILES files to process." >&2
-    CURRENT_FILE=0
+     # Inform user if they requested multi-chapter but conditions don't support it
+     if [[ "$OUTPUT_MODE" == "multi-chapter" ]]; then
+         echo "Note: Multi-chapter output requested but conditions for specialized multi-chapter processing not met." >&2
+         echo "      Falling back to individual file conversion." >&2
+         echo "------------------------------------------------------------" >&2
+     fi
+
+     echo "Found $TOTAL_FILES files to process." >&2
+     CURRENT_FILE=0
 
     for input in "${ALL_FILES[@]}"; do
         ((CURRENT_FILE++))

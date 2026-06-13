@@ -1,0 +1,28 @@
+#!/bin/bash
+
+# Target host argument (defaults to local hostname)
+TARGET_HOST=${1:-$(hostname)}
+
+# 1. Fetch the last two snapshot IDs for the specified host
+IDs=$(restic snapshots --host "$TARGET_HOST" --latest 2 --json | jq -r '.[].id')
+
+# Convert IDs into an array
+ID_ARRAY=($IDs)
+
+# 2. Check if we actually have two snapshots to compare
+if [ ${#ID_ARRAY[@]} -lt 2 ]; then
+    echo "Error: Need at least two snapshots for host '$TARGET_HOST' to perform a diff."
+    exit 1
+fi
+
+# 3. Run the diff and format the output
+# We use ${ID_ARRAY[0]} as older and ${ID_ARRAY[1]} as newer snapshot
+restic diff ${ID_ARRAY[0]} ${ID_ARRAY[1]} --json | jq -r '
+  select(.message_type == "statistics") | 
+  "Summary of changes:\n------------------\n" +
+  "Files Added:   \(.added.files)\n" +
+  "Files Removed: \(.removed.files)\n" +
+  "Files Changed: \(.changed_files)\n" +
+  "Directories:   \(.added.dirs + .removed.dirs)\n" +
+  "Data Added:    \((.added.bytes // 0) | . / 1024 / 1024 | round) MB\n" +
+  "Data Removed   \((.removed.bytes // 0) | . / 1024 / 1024 | round) MB"'

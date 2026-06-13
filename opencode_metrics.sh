@@ -44,7 +44,7 @@ output=$(jq -n \
     "LastSessionAgentTime": ($agent_time | tonumber)
   }')
 
-#echo $output
+echo $output
 
 # Publish to MQTT if broker is configured, otherwise output to stdout
 if [ -n "${MQTT_BROKER}" ]; then
