@@ -8,10 +8,30 @@ if [ ! -f "$OPENCODE_DB" ]; then
     exit 0
 fi
 
-# 1. Get Latest Session ID
-latest_session_id=$(sqlite3 "$OPENCODE_DB" "SELECT id FROM session ORDER BY time_updated DESC LIMIT 1")
+# 1. Get Latest Session ID and update time
+latest_session_info=$(sqlite3 "$OPENCODE_DB" "SELECT id, time_updated FROM session ORDER BY time_updated DESC LIMIT 1")
 
-if [ -z "$latest_session_id" ]; then
+if [ -z "$latest_session_info" ]; then
+    exit 0
+fi
+
+latest_session_id=$(echo "$latest_session_info" | cut -d'|' -f1)
+latest_session_time=$(echo "$latest_session_info" | cut -d'|' -f2)
+
+if [ -z "$latest_session_id" ] || [ -z "$latest_session_time" ]; then
+    exit 0
+fi
+
+# Ensure output is generated only if the last session is for the current day
+if [[ ! "$latest_session_time" =~ ^[0-9]+$ ]]; then
+    exit 0
+fi
+
+latest_session_sec=$((latest_session_time / 1000))
+latest_session_date=$(date -d "@$latest_session_sec" +%Y-%m-%d 2>/dev/null)
+current_date=$(date +%Y-%m-%d)
+
+if [ "$latest_session_date" != "$current_date" ]; then
     exit 0
 fi
 
@@ -44,11 +64,10 @@ output=$(jq -n \
     "LastSessionAgentTime": ($agent_time | tonumber)
   }')
 
-echo $output
+# Always output to stdout for visibility
+echo "$output"
 
-# Publish to MQTT if broker is configured, otherwise output to stdout
+# Publish to MQTT if broker is configured
 if [ -n "${MQTT_BROKER}" ]; then
   /usr/bin/mosquitto_pub -h "${MQTT_BROKER}" -u "${MQTT_USER}" -P "${MQTT_PWD}" -t "${MQTT_TOPIC_OPENCODE}" -m "$output"
-else
-  echo "$output"
 fi

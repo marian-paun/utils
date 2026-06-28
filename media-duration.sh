@@ -5,7 +5,8 @@ function duration () {
   num_cores=$(grep -c ^processor /proc/cpuinfo 2>/dev/null || echo 2)
 
   /usr/bin/find "$1" -type f -regex '.*\.\(mkv\|avi\|mp4\|mov\|mp3\|m4a\|m4b\|opus\)$' -print0 |
-  /usr/bin/xargs -0 -n1 -P "$num_cores" sh -c '
+#  /usr/bin/xargs -0 -n1 -P "$num_cores" sh -c '
+  /usr/bin/xargs -0 -n1 sh -c '
     duration=$(/opt/bin/ffprobe -v quiet -of csv=p=0 -show_entries format=duration "$1")
     if [ -n "$duration" ]; then
         printf "%.0f\n" "$duration"
@@ -30,4 +31,4 @@ echo "}";
 )
 
 #echo $output
-/opt/bin/mosquitto_pub -h oramicro2.alpine-blues.ts.net -u "${MQTT_USER}" -P "${MQTT_PWD}" -t "homeassistant/sensor/Astor/Media/Duration" -m "$output"
+/opt/bin/mosquitto_pub -h 100.116.17.61 -u "${MQTT_USER}" -P "${MQTT_PWD}" -t "homeassistant/sensor/Astor/Media/Duration" -m "$output"
