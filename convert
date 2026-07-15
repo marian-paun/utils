@@ -3,7 +3,7 @@
 # ==============================================================================
 # CONFIGURATION & DEFAULTS
 # ==============================================================================
-AUDIO_QUALITY="-q:a 2"
+AUDIO_QUALITY=("-q:a" "2")
 AUDIO_CODEC="aac"
 OUTPUT_EXT="m4a"
 OUTPUT_MODE="" # Will be prompted if not set via flag
@@ -57,7 +57,7 @@ while getopts "m:q:h" opt; do
                 *) echo "Error: Invalid mode '$OPTARG'. Use 'i' or 'm'." >&2; exit 1 ;;
             esac
             ;;
-        q) AUDIO_QUALITY="$OPTARG" ;;
+        q) IFS=' ' read -r -a AUDIO_QUALITY <<< "$OPTARG" ;;
         h) usage ;;
         *) usage ;;
     esac
@@ -130,7 +130,7 @@ get_metadata_args() {
     [[ -n "${metadata_map["Album"]}" ]]  && args+=("-metadata" "album=${metadata_map["Album"]}")
     [[ -n "${metadata_map["Year"]}" ]]   && args+=("-metadata" "date=${metadata_map["Year"]}")
     [[ -n "${metadata_map["Genre"]}" ]]  && args+=("-metadata" "genre=${metadata_map["Genre"]}")
-    printf '%s\0' "${args[@]}"
+    [[ ${#args[@]} -gt 0 ]] && printf '%s\0' "${args[@]}"
 }
 
 # Construct the part of the ffmpeg command responsible for adding cover art.
@@ -227,7 +227,7 @@ convert_single_file() {
     cmd+=("${art_args[@]}")
 
     # Add output options and final output file path
-    cmd+=(-c:a "$AUDIO_CODEC" $AUDIO_QUALITY -map_metadata 0 -movflags +faststart "$output")
+    cmd+=(-c:a "$AUDIO_CODEC" "${AUDIO_QUALITY[@]}" -map_metadata 0 -movflags +faststart "$output")
 
     # Execute the conversion
     if "${cmd[@]}"; then
@@ -238,6 +238,112 @@ convert_single_file() {
     fi
 }
 
+
+# Merge all .m4a files in SEARCH_DIR into a single multi-chapter .m4a file
+merge_m4a_files() {
+    local album_name="${METADATA_FROM_INFO["Album"]}"
+    [[ -z "$album_name" ]] && album_name=$(basename "$SEARCH_DIR")
+    [[ "$album_name" == "." ]] && album_name=$(basename "$(pwd)")
+
+    local output="$SEARCH_DIR/$album_name.$OUTPUT_EXT"
+
+    if [[ -f "$output" ]]; then
+        echo "Skipping (output exists: $(basename "$output"))" >&2
+        return
+    fi
+
+    local concat_file metadata_file
+    concat_file=$(mktemp -p "$TEMP_BASE_DIR")
+    metadata_file=$(mktemp -p "$TEMP_BASE_DIR")
+    TEMPORARY_ITEMS+=("$concat_file" "$metadata_file")
+
+    local current_time_ms=0
+    CHAPTER_TIMES=()
+    CHAPTER_TITLES=()
+
+    echo ";FFMETADATA1" > "$metadata_file"
+
+    [[ -n "${METADATA_FROM_INFO["Artist"]}" ]] && echo "artist=${METADATA_FROM_INFO["Artist"]}" >> "$metadata_file"
+    [[ -n "${METADATA_FROM_INFO["Album"]}" ]] && echo "album=${METADATA_FROM_INFO["Album"]}" >> "$metadata_file"
+    [[ -n "${METADATA_FROM_INFO["Year"]}" ]] && echo "date=${METADATA_FROM_INFO["Year"]}" >> "$metadata_file"
+    [[ -n "${METADATA_FROM_INFO["Genre"]}" ]] && echo "genre=${METADATA_FROM_INFO["Genre"]}" >> "$metadata_file"
+
+    echo "Preparing M4A files for merge..." >&2
+    for f in "${M4A_FILES[@]}"; do
+        local p="$f"
+        p="${p//\'/\'\\\'\'}"
+        printf "file '%s'\n" "$p" >> "$concat_file"
+
+        local duration_ms
+        duration_ms=$(ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "$f" | awk '{printf "%.0f", $1 * 1000}')
+        [[ -z "$duration_ms" ]] && duration_ms=0
+
+        local title
+        title=$(ffprobe -v error -show_entries format_tags=title -of default=noprint_wrappers=1:nokey=1 "$f" | head -n 1)
+        [[ -z "$title" ]] && title=$(basename "$f" | sed 's/\.[^.]*$//')
+
+        echo "" >> "$metadata_file"
+        echo "[CHAPTER]" >> "$metadata_file"
+        echo "TIMEBASE=1/1000" >> "$metadata_file"
+        echo "START=$current_time_ms" >> "$metadata_file"
+        CHAPTER_TIMES+=("$current_time_ms")
+        CHAPTER_TITLES+=("$title")
+        current_time_ms=$((current_time_ms + duration_ms))
+        echo "END=$((current_time_ms - 1))" >> "$metadata_file"
+        echo "title=$title" >> "$metadata_file"
+    done
+
+    local cover
+    cover=$(find_cover_art "$SEARCH_DIR")
+
+    local cmd=(ffmpeg -nostdin -hide_banner -loglevel error -stats -y -progress pipe:1)
+    cmd+=(-f concat -safe 0 -i "$concat_file")
+    cmd+=(-i "$metadata_file")
+
+    if [[ -n "$cover" ]]; then
+        echo "Adding external cover: $(basename "$cover")" >&2
+        cmd+=(-i "$cover")
+        cmd+=(-map 0:a -map 2:v -c:v mjpeg -disposition:v:0 attached_pic -map_metadata 1 -map_chapters 1)
+    else
+        local first_m4a="${M4A_FILES[0]}"
+        local has_embedded
+        has_embedded=$(ffprobe -v quiet -select_streams v -show_entries stream=index -of csv=p=0 "$first_m4a" | head -n 1)
+        if [[ -n "$has_embedded" ]]; then
+            echo "Extracting embedded cover art from first track..." >&2
+            local temp_cover
+            temp_cover=$(mktemp -p "$TEMP_BASE_DIR" --suffix=.jpg)
+            TEMPORARY_ITEMS+=("$temp_cover")
+            if ffmpeg -hide_banner -loglevel error -i "$first_m4a" -map 0:v:0 -c copy "$temp_cover" -y; then
+                cmd+=(-i "$temp_cover")
+                cmd+=(-map 0:a -map 2:v -c:v mjpeg -disposition:v:0 attached_pic -map_metadata 1 -map_chapters 1)
+            else
+                echo "Warning: Failed to extract embedded art. Proceeding without cover." >&2
+                cmd+=(-map 0:a -map_metadata 1 -map_chapters 1)
+            fi
+        else
+            cmd+=(-map 0:a -map_metadata 1 -map_chapters 1)
+        fi
+    fi
+
+    cmd+=(-c:a copy -movflags +faststart "$output")
+
+    echo "Executing ffmpeg to merge M4A files..." >&2
+    "${cmd[@]}" | report_chapter_progress
+
+    if [[ ${PIPESTATUS[0]} -eq 0 ]]; then
+        local total_sec=$((current_time_ms / 1000))
+        local h=$((total_sec / 3600))
+        local m=$(( (total_sec % 3600) / 60 ))
+        local s=$((total_sec % 60))
+        echo -e "\nSuccessfully merged ${#M4A_FILES[@]} files into: $(basename "$output")" >&2
+        echo "  Total duration: $(printf "%02d:%02d:%02d" $h $m $s)" >&2
+    else
+        echo -e "\nError merging M4A files" >&2
+        [[ -f "$output" ]] && rm "$output"
+    fi
+
+    rm "$concat_file" "$metadata_file"
+}
 
 # ==============================================================================
 # SCRIPT MAIN LOGIC
@@ -277,12 +383,16 @@ mapfile -d '' CUE_FILES < <(find "$SEARCH_DIR" -type f -iname "*.cue" -print0 | 
 mapfile -d '' FLAC_FILES < <(find "$SEARCH_DIR" -type f -iname "*.flac" -print0 | sort -z --version-sort)
 mapfile -d '' MP3_FILES < <(find "$SEARCH_DIR" -type f -iname "*.mp3" -print0 | sort -z --version-sort)
 mapfile -d '' WAV_FILES < <(find "$SEARCH_DIR" -type f -iname "*.wav" -print0 | sort -z --version-sort)
+mapfile -d '' M4A_FILES < <(find "$SEARCH_DIR" -type f -iname "*.m4a" -print0 | sort -z --version-sort)
+mapfile -d '' OPUS_FILES < <(find "$SEARCH_DIR" -type f -iname "*.opus" -print0 | sort -z --version-sort)
 
 NUM_CUE=${#CUE_FILES[@]}
 NUM_FLAC=${#FLAC_FILES[@]}
 NUM_MP3=${#MP3_FILES[@]}
 NUM_WAV=${#WAV_FILES[@]}
-NUM_AUDIO=$((NUM_FLAC + NUM_MP3 + NUM_WAV))
+NUM_M4A=${#M4A_FILES[@]}
+NUM_OPUS=${#OPUS_FILES[@]}
+NUM_AUDIO=$((NUM_FLAC + NUM_MP3 + NUM_WAV + NUM_OPUS))
 
 # Parse info.txt for metadata
 declare -A METADATA_FROM_INFO # Associative array for key-value pairs
@@ -295,6 +405,7 @@ if [[ $NUM_CUE -eq 1 && $NUM_AUDIO -eq 1 ]]; then
     [[ $NUM_FLAC -eq 1 ]] && AUDIO_FILE="${FLAC_FILES[0]}"
     [[ $NUM_MP3 -eq 1 ]] && AUDIO_FILE="${MP3_FILES[0]}"
     [[ $NUM_WAV -eq 1 ]] && AUDIO_FILE="${WAV_FILES[0]}"
+    [[ $NUM_OPUS -eq 1 ]] && AUDIO_FILE="${OPUS_FILES[0]}"
 
     echo "------------------------------------------------------------" >&2
     echo "Detected CUE sheet mode:" >&2
@@ -367,7 +478,7 @@ echo "Converting split tracks to .$OUTPUT_EXT..." >&2
                 cmd+=("${art_args[@]}")
 
                 # Add output options, copy all metadata from the source flac, and set output path
-                cmd+=(-c:a "$AUDIO_CODEC" $AUDIO_QUALITY -map_metadata 0 -movflags +faststart "$output_file")
+                cmd+=(-c:a "$AUDIO_CODEC" "${AUDIO_QUALITY[@]}" -map_metadata 0 -movflags +faststart "$output_file")
 
                 # Execute conversion
                 if ! "${cmd[@]}"; then
@@ -508,7 +619,7 @@ echo "Converting split tracks to .$OUTPUT_EXT..." >&2
 
 
                 # Add encoding options and output file
-                cmd+=(-c:a "$AUDIO_CODEC" $AUDIO_QUALITY -movflags +faststart "$output")
+                cmd+=(-c:a "$AUDIO_CODEC" "${AUDIO_QUALITY[@]}" -movflags +faststart "$output")
 
                 # Parse chapters for real-time reporting
                 mapfile -t CHAPTER_TIMES < <(grep '^START=' "$metadata_file" | cut -d= -f2-)
@@ -533,7 +644,7 @@ echo "Converting split tracks to .$OUTPUT_EXT..." >&2
     esac
 else
     # Check for multiple audio files (FLAC or WAV) to offer merging
-    if [[ $NUM_FLAC -gt 1 || $NUM_WAV -gt 1 ]]; then
+    if [[ $NUM_FLAC -gt 1 || $NUM_WAV -gt 1 || $NUM_OPUS -gt 1 ]]; then
         audio_type=""
         audio_count=0
         if [[ $NUM_FLAC -gt 1 ]]; then
@@ -543,10 +654,19 @@ else
         if [[ $NUM_WAV -gt 1 ]]; then
             if [[ -n "$audio_type" ]]; then
                 audio_type="$audio_type/WAV"
-                audio_count=$((NUM_FLAC + NUM_WAV))
+                audio_count=$((audio_count + NUM_WAV))
             else
                 audio_type="WAV"
                 audio_count=$NUM_WAV
+            fi
+        fi
+        if [[ $NUM_OPUS -gt 1 ]]; then
+            if [[ -n "$audio_type" ]]; then
+                audio_type="$audio_type/OPUS"
+                audio_count=$((audio_count + NUM_OPUS))
+            else
+                audio_type="OPUS"
+                audio_count=$NUM_OPUS
             fi
         fi
         echo "------------------------------------------------------------" >&2
@@ -599,6 +719,7 @@ echo "Calculating track durations and preparing metadata..." >&2
                   all_files=()
                   [[ $NUM_FLAC -gt 0 ]] && all_files+=("${FLAC_FILES[@]}")
                   [[ $NUM_WAV -gt 0 ]] && all_files+=("${WAV_FILES[@]}")
+                  [[ $NUM_OPUS -gt 0 ]] && all_files+=("${OPUS_FILES[@]}")
                   
                   for f in "${all_files[@]}"; do
                      # Escape single quotes for ffmpeg concat file.
@@ -647,8 +768,10 @@ else
                      # trying to concatenate video streams that might not be consistent.
                      if [[ $NUM_FLAC -gt 0 ]]; then
                          first_audio_file="${FLAC_FILES[0]}"
-                     else
+                     elif [[ $NUM_WAV -gt 0 ]]; then
                          first_audio_file="${WAV_FILES[0]}"
+                     else
+                         first_audio_file="${OPUS_FILES[0]}"
                      fi
                      has_embedded=$(ffprobe -v quiet -select_streams v -show_entries stream=index -of csv=p=0 "$first_audio_file" | head -n 1)
                      if [[ -n "$has_embedded" ]]; then
@@ -668,7 +791,7 @@ else
                      fi
                 fi
 
-                cmd+=(-c:a "$AUDIO_CODEC" $AUDIO_QUALITY -movflags +faststart "$output")
+                cmd+=(-c:a "$AUDIO_CODEC" "${AUDIO_QUALITY[@]}" -movflags +faststart "$output")
 
                 echo "Executing ffmpeg to merge files..." >&2
                 "${cmd[@]}" | report_chapter_progress
@@ -685,7 +808,7 @@ else
                     
                     echo -e "\n------------------------------------------------------------" >&2
                     echo "Merge Statistics:" >&2
-                    echo "  Tracks processed: $((${#FLAC_FILES[@]} + ${#WAV_FILES[@]}))" >&2
+                    echo "  Tracks processed: $((${#FLAC_FILES[@]} + ${#WAV_FILES[@]} + ${#OPUS_FILES[@]}))" >&2
                     echo "  Total duration:   $(printf "%02d:%02d:%02d" $h $m $s)" >&2
                     echo "  Output file:      $(basename "$output")" >&2
                     if [[ -f "$output" ]]; then
@@ -712,11 +835,18 @@ else
 
 # --- DEFAULT BEHAVIOR: Convert all found audio files one-by-one ---
 
-      mapfile -d '' ALL_FILES < <(find "$SEARCH_DIR" -type f \( -iname "*.flac" -o -iname "*.mp3" -o -iname "*.wav" \) -print0 | sort -z --version-sort)
+      mapfile -d '' ALL_FILES < <(find "$SEARCH_DIR" -type f \( -iname "*.flac" -o -iname "*.mp3" -o -iname "*.wav" -o -iname "*.opus" \) -print0 | sort -z --version-sort)
       TOTAL_FILES=${#ALL_FILES[@]}
 
       if [[ $TOTAL_FILES -eq 0 ]]; then
-          echo "No .flac, .mp3, or .wav files found in '$SEARCH_DIR'." >&2
+          if [[ $NUM_M4A -gt 0 ]]; then
+              echo "No FLAC/MP3/WAV/OPUS files found, but detected $NUM_M4A .m4a files." >&2
+              echo "Merging into a single multi-chapter .m4a file..." >&2
+              merge_m4a_files
+              echo "------------------------------------------------------------" >&2
+              exit 0
+          fi
+          echo "No .flac, .mp3, .wav, .opus, or .m4a files found in '$SEARCH_DIR'." >&2
           exit 0
       fi
 
