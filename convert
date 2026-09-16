@@ -133,63 +133,6 @@ get_metadata_args() {
     [[ ${#args[@]} -gt 0 ]] && printf '%s\0' "${args[@]}"
 }
 
-# Construct the part of the ffmpeg command responsible for adding cover art.
-#
-# $1: The input audio file path.
-# $2: The path to an external cover art file.
-# Returns: An array of ffmpeg arguments for video stream mapping.
-# This function is primarily for single-audio-input scenarios.
-# For multi-input (like chapters with cover), mappings need manual adjustment.
-build_cover_art_args() {
-    local input_file="$1"
-    local cover_file="$2"
-    local art_args=()
-
-    # Check for embedded art first
-    local has_embedded
-    has_embedded=$(ffprobe -v quiet -select_streams v -show_entries stream=index -of csv=p=0 "$input_file" | head -n 1)
-
-    if [[ -n "$has_embedded" ]]; then
-        echo "Using embedded cover art." >&2
-        # Map embedded art: map first audio and first video stream.
-        # -c:v copy preserves the image format (e.g., PNG, JPEG).
-        art_args=(-map 0:a -map 0:v:0 -c:v copy -disposition:v:0 attached_pic)
-    elif [[ -n "$cover_file" ]]; then
-        echo "Using external cover: $(basename "$cover_file")" >&2
-        # Add the cover as a new input and map streams.
-        # Input 0 is audio, Input 1 will be the cover image.
-        art_args=(-i "$cover_file" -map 0:a -map 1:v -c:v mjpeg -disposition:v:0 attached_pic)
-    else
-        # No art found, just map the audio stream.
-        art_args=(-map 0:a)
-    fi
-    # This is a bit of a hack to return an array from a function in bash
-    echo "${art_args[@]}"
-}
-
-# Function to report chapter progress during ffmpeg execution.
-# Expects CHAPTER_TIMES and CHAPTER_TITLES arrays to be populated.
-report_chapter_progress() {
-    local current_chap_idx=-1
-    local total_chapters=${#CHAPTER_TITLES[@]}
-    while read -r line; do
-        if [[ "$line" =~ out_time_ms=([0-9]+) ]]; then
-            local ms=$(( ${BASH_REMATCH[1]} / 1000 ))
-            local new_idx=$current_chap_idx
-            for ((i=${#CHAPTER_TIMES[@]}-1; i>=0; i--)); do
-                if (( ms >= ${CHAPTER_TIMES[$i]} )); then
-                    new_idx=$i
-                    break
-                fi
-            done
-            if (( new_idx > current_chap_idx )); then
-                current_chap_idx=$new_idx
-                echo -e "\nProcessing chapter $((current_chap_idx + 1)) of $total_chapters: ${CHAPTER_TITLES[$current_chap_idx]}" >&2
-            fi
-        fi
-    done
-}
-
 # Convert a single audio file to the target format.
 #
 # $1: Path to the input audio file.
@@ -218,13 +161,19 @@ convert_single_file() {
         cmd+=("${info_metadata_args[@]}")
     fi
 
-    # Get cover art arguments
-    local art_args_str
-    art_args_str=$(build_cover_art_args "$input" "$cover_file")
-    local art_args
-    read -r -a art_args <<< "$art_args_str"
+    # Check for cover art
+    local has_embedded
+    has_embedded=$(ffprobe -v quiet -select_streams v -show_entries stream=index -of csv=p=0 "$input" | head -n 1)
 
-    cmd+=("${art_args[@]}")
+    if [[ -n "$has_embedded" ]]; then
+        echo "Using embedded cover art." >&2
+        cmd+=(-map 0:a -map 0:v:0 -c:v copy -disposition:v:0 attached_pic)
+    elif [[ -n "$cover_file" ]]; then
+        echo "Using external cover: $(basename "$cover_file")" >&2
+        cmd+=(-i "$cover_file" -map 0:a -map 1:v -c:v mjpeg -disposition:v:0 attached_pic)
+    else
+        cmd+=(-map 0:a)
+    fi
 
     # Add output options and final output file path
     cmd+=(-c:a "$AUDIO_CODEC" "${AUDIO_QUALITY[@]}" -map_metadata 0 -movflags +faststart "$output")
