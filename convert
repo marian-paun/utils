@@ -7,7 +7,7 @@ AUDIO_QUALITY=("-q:a" "2")
 AUDIO_CODEC="aac"
 OUTPUT_EXT="m4a"
 OUTPUT_MODE="" # Will be prompted if not set via flag
-DRY_RUN=false
+DRY_RUN=false  # Reserved for future dry-run functionality
 TEMPORARY_ITEMS=()
 
 # ==============================================================================
@@ -39,6 +39,7 @@ Usage: $(basename "$0") [OPTIONS] [INPUT_FOLDER]
 Options:
   -m MODE      Output mode: 'individual' (i) or 'multi-chapter' (m)
   -q QUALITY   Audio quality for ffmpeg (default: "-q:a 2")
+  -d           Dry run - simulate conversions without actually running them
   -h           Show this help message
 
 If INPUT_FOLDER is not provided, the current directory is used.
@@ -48,7 +49,7 @@ EOF
 }
 
 # Parse command line options
-while getopts "m:q:h" opt; do
+while getopts "m:qd:h" opt; do
     case "$opt" in
         m)
             case "$OPTARG" in
@@ -58,6 +59,7 @@ while getopts "m:q:h" opt; do
             esac
             ;;
         q) IFS=' ' read -r -a AUDIO_QUALITY <<< "$OPTARG" ;;
+        d) DRY_RUN=true ;;
         h) usage ;;
         *) usage ;;
     esac
@@ -89,16 +91,32 @@ trim_string() {
     printf '%s' "$var"
 }
 
-# Find the best available cover art file in a directory.
+# Find the best available cover art file in a directory or its parent hierarchy.
 find_cover_art() {
     local search_dir="$1"
-    # Single find call with OR logic is more efficient
-    find "$search_dir" -maxdepth 1 -type f \( \
-        -iname "cover.jpg" -o -iname "cover.jpeg" -o -iname "cover.png" -o \
-        -iname "folder.jpg" -o -iname "folder.png" -o \
-        -iname "front.jpg" -o -iname "front.png" -o \
-        -iname "*.jpg" -o -iname "*.png" \
-    \) -print -quit
+    local current_dir="$search_dir"
+
+    while [[ -n "$current_dir" ]]; do
+        local found
+        found=$(find "$current_dir" -maxdepth 1 -type f \( \
+            -iname "cover.jpg" -o -iname "cover.jpeg" -o -iname "cover.png" -o \
+            -iname "folder.jpg" -o -iname "folder.png" -o \
+            -iname "front.jpg" -o -iname "front.png" -o \
+            -iname "*.jpg" -o -iname "*.png" \
+        \) -print -quit)
+
+        if [[ -n "$found" ]]; then
+            echo "$found"
+            return 0
+        fi
+
+        # Stop if we reached root or top of search context
+        if [[ "$current_dir" == "/" || "$current_dir" == "." ]]; then
+            break
+        fi
+
+        current_dir=$(dirname "$current_dir")
+    done
 }
 
 # Parse info.txt for metadata with validation
@@ -131,6 +149,40 @@ get_metadata_args() {
     [[ -n "${metadata_map["Year"]}" ]]   && args+=("-metadata" "date=${metadata_map["Year"]}")
     [[ -n "${metadata_map["Genre"]}" ]]  && args+=("-metadata" "genre=${metadata_map["Genre"]}")
     [[ ${#args[@]} -gt 0 ]] && printf '%s\0' "${args[@]}"
+}
+
+# Parse ffmpeg progress output to display chapter titles during conversion
+report_chapter_progress() {
+    local current_chapter_idx=-1
+    local line time_ms h m s formatted_time
+
+    while read -r line; do
+        if [[ "$line" =~ ^out_time_ms=([0-9]+) ]]; then
+            # ffmpeg's out_time_ms is actually in microseconds despite its
+            # name, so scale down to milliseconds before comparing against
+            # the (millisecond) chapter times.
+            time_ms=$((BASH_REMATCH[1] / 1000))
+            if [[ ${#CHAPTER_TIMES[@]} -gt 0 ]]; then
+                local new_idx=$current_chapter_idx
+                for i in "${!CHAPTER_TIMES[@]}"; do
+                    if [[ $time_ms -ge ${CHAPTER_TIMES[$i]} ]]; then
+                        new_idx=$i
+                    else
+                        break
+                    fi
+                done
+                if [[ $new_idx -ne $current_chapter_idx && $new_idx -ge 0 ]]; then
+                    current_chapter_idx=$new_idx
+                    local sec=$((CHAPTER_TIMES[current_chapter_idx] / 1000))
+                    h=$((sec / 3600))
+                    m=$(( (sec % 3600) / 60 ))
+                    s=$((sec % 60))
+                    formatted_time=$(printf "%02d:%02d:%02d" $h $m $s)
+                    echo -e "\nProcessing Chapter $((current_chapter_idx + 1))/${#CHAPTER_TIMES[@]} [$formatted_time]: ${CHAPTER_TITLES[$current_chapter_idx]}" >&2
+                fi
+            fi
+        fi
+    done
 }
 
 # Convert a single audio file to the target format.
@@ -179,7 +231,10 @@ convert_single_file() {
     cmd+=(-c:a "$AUDIO_CODEC" "${AUDIO_QUALITY[@]}" -map_metadata 0 -movflags +faststart "$output")
 
     # Execute the conversion
-    if "${cmd[@]}"; then
+    if [[ "$DRY_RUN" == true ]]; then
+        echo -e "\n[DRY RUN] Would execute: ${cmd[*]}" >&2
+        printf "[DRY RUN] Simulated: %s -> %s\n" "$(basename "$input")" "$(basename "$output")" >&2
+    elif "${cmd[@]}"; then
         printf "Successfully finished: %s\n" "$(basename "$output")" >&2
     else
         printf "Error converting: %s\n" "$(basename "$input")" >&2
@@ -218,6 +273,7 @@ merge_m4a_files() {
     [[ -n "${METADATA_FROM_INFO["Genre"]}" ]] && echo "genre=${METADATA_FROM_INFO["Genre"]}" >> "$metadata_file"
 
     echo "Preparing M4A files for merge..." >&2
+        { echo ""; } >> "$metadata_file"
     for f in "${M4A_FILES[@]}"; do
         local p="$f"
         p="${p//\'/\'\\\'\'}"
@@ -242,33 +298,35 @@ merge_m4a_files() {
         echo "title=$title" >> "$metadata_file"
     done
 
-    local cover
-    cover=$(find_cover_art "$SEARCH_DIR")
+    local temp_cover=""
+    local first_m4a="${M4A_FILES[0]}"
+    local has_embedded
+    has_embedded=$(ffprobe -v quiet -select_streams v -show_entries stream=index -of csv=p=0 "$first_m4a" | head -n 1)
 
     local cmd=(ffmpeg -nostdin -hide_banner -loglevel error -stats -y -progress pipe:1)
     cmd+=(-f concat -safe 0 -i "$concat_file")
     cmd+=(-i "$metadata_file")
 
-    if [[ -n "$cover" ]]; then
-        echo "Adding external cover: $(basename "$cover")" >&2
-        cmd+=(-i "$cover")
-        cmd+=(-map 0:a -map 2:v -c:v mjpeg -disposition:v:0 attached_pic -map_metadata 1 -map_chapters 1)
-    else
-        local first_m4a="${M4A_FILES[0]}"
-        local has_embedded
-        has_embedded=$(ffprobe -v quiet -select_streams v -show_entries stream=index -of csv=p=0 "$first_m4a" | head -n 1)
-        if [[ -n "$has_embedded" ]]; then
-            echo "Extracting embedded cover art from first track..." >&2
-            local temp_cover
-            temp_cover=$(mktemp -p "$TEMP_BASE_DIR" --suffix=.jpg)
-            TEMPORARY_ITEMS+=("$temp_cover")
-            if ffmpeg -hide_banner -loglevel error -i "$first_m4a" -map 0:v:0 -c copy "$temp_cover" -y; then
-                cmd+=(-i "$temp_cover")
-                cmd+=(-map 0:a -map 2:v -c:v mjpeg -disposition:v:0 attached_pic -map_metadata 1 -map_chapters 1)
-            else
-                echo "Warning: Failed to extract embedded art. Proceeding without cover." >&2
-                cmd+=(-map 0:a -map_metadata 1 -map_chapters 1)
-            fi
+    if [[ -n "$has_embedded" ]]; then
+        echo "Extracting embedded cover art from source track..." >&2
+        temp_cover=$(mktemp -p "$TEMP_BASE_DIR" --suffix=.jpg)
+        TEMPORARY_ITEMS+=("$temp_cover")
+        if ffmpeg -hide_banner -loglevel error -i "$first_m4a" -map 0:v:0 -c copy "$temp_cover" -y; then
+            cmd+=(-i "$temp_cover")
+            cmd+=(-map 0:a -map 2:v -c:v mjpeg -disposition:v:0 attached_pic -map_metadata 1 -map_chapters 1)
+        else
+            echo "Warning: Failed to extract embedded art. Checking for external cover..." >&2
+            temp_cover=""
+        fi
+    fi
+
+    if [[ -z "$temp_cover" ]]; then
+        local cover
+        cover=$(find_cover_art "$(dirname "$first_m4a")")
+        if [[ -n "$cover" ]]; then
+            echo "Adding external cover: $(basename "$cover")" >&2
+            cmd+=(-i "$cover")
+            cmd+=(-map 0:a -map 2:v -c:v mjpeg -disposition:v:0 attached_pic -map_metadata 1 -map_chapters 1)
         else
             cmd+=(-map 0:a -map_metadata 1 -map_chapters 1)
         fi
@@ -277,9 +335,13 @@ merge_m4a_files() {
     cmd+=(-c:a copy -movflags +faststart "$output")
 
     echo "Executing ffmpeg to merge M4A files..." >&2
-    "${cmd[@]}" | report_chapter_progress
+    if [[ "$DRY_RUN" == true ]]; then
+        echo -e "\n[DRY RUN] Would merge ${#M4A_FILES[@]} M4A files into: $(basename "$output")" >&2
+    else
+        "${cmd[@]}" | report_chapter_progress
+    fi
 
-    if [[ ${PIPESTATUS[0]} -eq 0 ]]; then
+    if [[ "$DRY_RUN" != true ]] && [[ ${PIPESTATUS[0]} -eq 0 ]]; then
         local total_sec=$((current_time_ms / 1000))
         local h=$((total_sec / 3600))
         local m=$(( (total_sec % 3600) / 60 ))
@@ -385,7 +447,11 @@ if [[ $NUM_CUE -eq 1 && $NUM_AUDIO -eq 1 ]]; then
             split_dir=$(mktemp -d -p "$TEMP_BASE_DIR")
             TEMPORARY_ITEMS+=("$split_dir")
             # Use shnsplit to create tagged flac files
-            shnsplit -d "$split_dir" -f "$CUE_FILE" -t "%n - %t" -o flac "$AUDIO_FILE"
+            if [[ "$DRY_RUN" == true ]]; then
+                echo "[DRY RUN] Would split using shnsplit..." >&2
+            else
+                shnsplit -d "$split_dir" -f "$CUE_FILE" -t "%n - %t" -o flac "$AUDIO_FILE"
+            fi
 
 echo "Converting split tracks to .$OUTPUT_EXT..." >&2
              # Create an array of split files and sort them numerically by track number
@@ -430,9 +496,12 @@ echo "Converting split tracks to .$OUTPUT_EXT..." >&2
                 cmd+=(-c:a "$AUDIO_CODEC" "${AUDIO_QUALITY[@]}" -map_metadata 0 -movflags +faststart "$output_file")
 
                 # Execute conversion
-                if ! "${cmd[@]}"; then
+                if [[ "$DRY_RUN" == true ]]; then
+                    echo -e "\n[DRY RUN] Would execute: ${cmd[*]}" >&2
+                    printf "[DRY RUN] Simulated: %s -> %s\n" "$(basename "$track_flac")" "$(basename "$output_file")" >&2
+                elif ! "${cmd[@]}"; then
                     echo "Error converting: $(basename "$track_flac")" >&2
-                    [[ -f "$output" ]] && rm "$output"
+                    [[ -f "$output_file" ]] && rm "$output_file"
                 fi
             done
 
@@ -575,12 +644,16 @@ echo "Converting split tracks to .$OUTPUT_EXT..." >&2
                 mapfile -t CHAPTER_TITLES < <(grep '^title=' "$metadata_file" | cut -d= -f2-)
 
                 echo "Executing ffmpeg with generated chapter metadata..." >&2
-                "${cmd[@]}" | report_chapter_progress
-                if [[ ${PIPESTATUS[0]} -eq 0 ]]; then
+                if [[ "$DRY_RUN" == true ]]; then
+                    echo -e "\n[DRY RUN] Would convert with chapters: $(basename "$output")" >&2
+                else
+                    "${cmd[@]}" | report_chapter_progress
+                fi
+                if [[ "$DRY_RUN" != true ]] && [[ ${PIPESTATUS[0]} -eq 0 ]]; then
                     echo -e "\nSuccessfully finished: $(basename "$output")" >&2
                 else
                     echo -e "\nError converting: $(basename "$AUDIO_FILE")" >&2
-                    [[ -f "$output" ]] && rm "$output"
+                    [[ "$DRY_RUN" != true ]] && [[ -f "$output" ]] && rm "$output"
                 fi
                 # Clean up metadata file
                 rm "$metadata_file"
@@ -593,33 +666,13 @@ echo "Converting split tracks to .$OUTPUT_EXT..." >&2
     esac
 else
     # Check for multiple audio files (FLAC or WAV) to offer merging
-    if [[ $NUM_FLAC -gt 1 || $NUM_WAV -gt 1 || $NUM_OPUS -gt 1 ]]; then
-        audio_type=""
-        audio_count=0
-        if [[ $NUM_FLAC -gt 1 ]]; then
-            audio_type="FLAC"
-            audio_count=$NUM_FLAC
-        fi
-        if [[ $NUM_WAV -gt 1 ]]; then
-            if [[ -n "$audio_type" ]]; then
-                audio_type="$audio_type/WAV"
-                audio_count=$((audio_count + NUM_WAV))
-            else
-                audio_type="WAV"
-                audio_count=$NUM_WAV
-            fi
-        fi
-        if [[ $NUM_OPUS -gt 1 ]]; then
-            if [[ -n "$audio_type" ]]; then
-                audio_type="$audio_type/OPUS"
-                audio_count=$((audio_count + NUM_OPUS))
-            else
-                audio_type="OPUS"
-                audio_count=$NUM_OPUS
-            fi
-        fi
+    # Merge is offered whenever there are 2+ mergeable audio files
+    # (FLAC/MP3/WAV/OPUS) anywhere under SEARCH_DIR. In multi-chapter
+    # mode they are gathered recursively and sorted by full path
+    # (folder, then file) so chapters follow the natural order.
+    if [[ $NUM_AUDIO -ge 2 ]]; then
         echo "------------------------------------------------------------" >&2
-         echo "Detected multiple $audio_type files ($audio_count files)." >&2
+        echo "Detected $NUM_AUDIO audio files for potential merge." >&2
          # Determine action based on user preference
          if [[ "$OUTPUT_MODE" == "individual" ]]; then
              choice="i"
@@ -664,11 +717,9 @@ else
                 CHAPTER_TITLES=()
 
 echo "Calculating track durations and preparing metadata..." >&2
-                  # Process both FLAC and WAV files
-                  all_files=()
-                  [[ $NUM_FLAC -gt 0 ]] && all_files+=("${FLAC_FILES[@]}")
-                  [[ $NUM_WAV -gt 0 ]] && all_files+=("${WAV_FILES[@]}")
-                  [[ $NUM_OPUS -gt 0 ]] && all_files+=("${OPUS_FILES[@]}")
+        { echo ""; } >> "$metadata_file"
+                  # Process all audio files sorted by path
+                  mapfile -d '' all_files < <(find "$SEARCH_DIR" -type f \( -iname "*.flac" -o -iname "*.mp3" -o -iname "*.wav" -o -iname "*.opus" \) -print0 | sort -z --version-sort)
                   
                   for f in "${all_files[@]}"; do
                      # Escape single quotes for ffmpeg concat file.
@@ -698,54 +749,52 @@ echo "Calculating track durations and preparing metadata..." >&2
                     echo "title=$(escape_metadata "$title")" >> "$metadata_file"
                 done
 
-                # Cover art
-                cover=$(find_cover_art "$SEARCH_DIR")
+                # Cover art selection priority:
+                # 1. Embedded thumbnail/cover in source audio file
+                # 2. External image file in source directory or parent directory hierarchy
                 temp_cover=""
+                first_audio_file="${all_files[0]}"
+                has_embedded=$(ffprobe -v quiet -select_streams v -show_entries stream=index -of csv=p=0 "$first_audio_file" | head -n 1)
 
                 # Build ffmpeg command
                 cmd=(ffmpeg -nostdin -hide_banner -loglevel error -stats -y -progress pipe:1)
                 cmd+=(-f concat -safe 0 -i "$concat_file") # Input 0
                 cmd+=(-i "$metadata_file") # Input 1
 
-                if [[ -n "$cover" ]]; then
-                    echo "Adding external cover: $(basename "$cover")" >&2
-                    cmd+=(-i "$cover") # Input 2
-                    cmd+=(-map 0:a -map 2:v -c:v mjpeg -disposition:v:0 attached_pic -map_metadata 1 -map_chapters 1)
-else
-                     # Check for embedded art in the FIRST audio file (FLAC or WAV)
-                     # We extract it to a temporary file to avoid issues with concat demuxer
-                     # trying to concatenate video streams that might not be consistent.
-                     if [[ $NUM_FLAC -gt 0 ]]; then
-                         first_audio_file="${FLAC_FILES[0]}"
-                     elif [[ $NUM_WAV -gt 0 ]]; then
-                         first_audio_file="${WAV_FILES[0]}"
-                     else
-                         first_audio_file="${OPUS_FILES[0]}"
-                     fi
-                     has_embedded=$(ffprobe -v quiet -select_streams v -show_entries stream=index -of csv=p=0 "$first_audio_file" | head -n 1)
-                     if [[ -n "$has_embedded" ]]; then
-                          echo "Extracting embedded cover art from first track..." >&2
-                          temp_cover=$(mktemp -p "$TEMP_BASE_DIR" --suffix=.jpg)
-                          TEMPORARY_ITEMS+=("$temp_cover")
-                          if ffmpeg -hide_banner -loglevel error -i "$first_audio_file" -map 0:v:0 -c copy "$temp_cover" -y; then
-                              cmd+=(-i "$temp_cover") # Input 2
-                              cmd+=(-map 0:a -map 2:v -c:v mjpeg -disposition:v:0 attached_pic -map_metadata 1 -map_chapters 1)
-                          else
-                              echo "Warning: Failed to extract embedded art. Proceeding without cover." >&2
-                              cmd+=(-map 0:a -map_metadata 1 -map_chapters 1)
-                              temp_cover=""
-                          fi
-                     else
-                          cmd+=(-map 0:a -map_metadata 1 -map_chapters 1)
-                     fi
+                if [[ -n "$has_embedded" ]]; then
+                    echo "Extracting embedded cover art from source track..." >&2
+                    temp_cover=$(mktemp -p "$TEMP_BASE_DIR" --suffix=.jpg)
+                    TEMPORARY_ITEMS+=("$temp_cover")
+                    if ffmpeg -hide_banner -loglevel error -i "$first_audio_file" -map 0:v:0 -c copy "$temp_cover" -y; then
+                        cmd+=(-i "$temp_cover") # Input 2
+                        cmd+=(-map 0:a -map 2:v -c:v mjpeg -disposition:v:0 attached_pic -map_metadata 1 -map_chapters 1)
+                    else
+                        echo "Warning: Failed to extract embedded art. Checking for external cover..." >&2
+                        temp_cover=""
+                    fi
+                fi
+
+                if [[ -z "$temp_cover" ]]; then
+                    cover=$(find_cover_art "$(dirname "$first_audio_file")")
+                    if [[ -n "$cover" ]]; then
+                        echo "Adding external cover: $(basename "$cover")" >&2
+                        cmd+=(-i "$cover") # Input 2
+                        cmd+=(-map 0:a -map 2:v -c:v mjpeg -disposition:v:0 attached_pic -map_metadata 1 -map_chapters 1)
+                    else
+                        cmd+=(-map 0:a -map_metadata 1 -map_chapters 1)
+                    fi
                 fi
 
                 cmd+=(-c:a "$AUDIO_CODEC" "${AUDIO_QUALITY[@]}" -movflags +faststart "$output")
 
                 echo "Executing ffmpeg to merge files..." >&2
-                "${cmd[@]}" | report_chapter_progress
+                if [[ "$DRY_RUN" == true ]]; then
+                    echo -e "\n[DRY RUN] Would merge ${#all_files[@]} files into: $(basename "$output")" >&2
+                else
+                    "${cmd[@]}" | report_chapter_progress
+                fi
 
-                if [[ ${PIPESTATUS[0]} -eq 0 ]]; then
+                if [[ "$DRY_RUN" != true ]] && [[ ${PIPESTATUS[0]} -eq 0 ]]; then
                     end_time=$(date +%s)
                     elapsed=$((end_time - start_time))
                     
@@ -757,7 +806,7 @@ else
                     
                     echo -e "\n------------------------------------------------------------" >&2
                     echo "Merge Statistics:" >&2
-                    echo "  Tracks processed: $((${#FLAC_FILES[@]} + ${#WAV_FILES[@]} + ${#OPUS_FILES[@]}))" >&2
+                    echo "  Tracks processed: ${#all_files[@]}" >&2
                     echo "  Total duration:   $(printf "%02d:%02d:%02d" $h $m $s)" >&2
                     echo "  Output file:      $(basename "$output")" >&2
                     if [[ -f "$output" ]]; then
@@ -769,7 +818,7 @@ else
                     echo "Successfully finished: $(basename "$output")" >&2
                 else
                     echo -e "\nError merging files" >&2
-                    [[ -f "$output" ]] && rm "$output"
+                    [[ "$DRY_RUN" != true ]] && [[ -f "$output" ]] && rm "$output"
                 fi
 
                 rm "$concat_file" "$metadata_file"
@@ -824,10 +873,10 @@ else
         # Find cover art once per directory
         cover=$(find_cover_art "$dir")
 
-        convert_single_file "$input" "$output" "$cover" METADATA_FROM_INFO
+        convert_single_file "$input" "$output_file" "$cover" METADATA_FROM_INFO
     done
-fi
 
 echo "------------------------------------------------------------" >&2
 echo "Batch conversion complete." >&2
 echo "------------------------------------------------------------" >&2
+fi
